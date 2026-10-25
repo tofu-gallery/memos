@@ -68,6 +68,8 @@ func init() {
 	rootCmd.Flags().String("log-level", "info", "log verbosity level (debug, info, warn, error)")
 	rootCmd.Flags().Bool("rate-limit", true, "enable request rate limiting")
 	rootCmd.Flags().StringSlice("trusted-proxies", []string{"private"}, "proxies whose forwarding headers identify the client: CIDRs, IPs, \"private\" (default; the loopback and private ranges), or \"none\" when the instance is reached without a header-rewriting proxy")
+	// Tofu (2026-10-25): a deployment-level switch that keeps self-service sign-up closed (MEMOS_DISALLOW_USER_REGISTRATION).
+	rootCmd.Flags().Bool("disallow-user-registration", false, "keep self-service sign-up closed whatever the instance setting says (the first account can still be created)")
 
 	if err := rootCmd.Flags().MarkDeprecated("allow-private-webhooks", "use --webhook-private-network-allowlist to allow only required destinations"); err != nil {
 		panic(err)
@@ -86,6 +88,7 @@ func init() {
 		"log-level",
 		"rate-limit",
 		"trusted-proxies",
+		"disallow-user-registration",
 	} {
 		if err := viper.BindPFlag(key, rootCmd.Flags().Lookup(key)); err != nil {
 			panic(err)
@@ -121,6 +124,8 @@ func runServer() error {
 		TrustedProxies: viper.GetStringSlice("trusted-proxies"),
 		Version:        version.GetCurrentVersion(),
 		Commit:         version.Commit,
+		// Tofu (2026-10-25): see the disallow-user-registration flag above.
+		DisallowUserRegistration: viper.GetBool("disallow-user-registration"),
 	}
 
 	allowPrivateWebhooks := viper.GetBool("allow-private-webhooks")

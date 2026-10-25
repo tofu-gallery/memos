@@ -39,6 +39,9 @@ type Profile struct {
 	// TrustedProxies lists the proxies whose forwarding headers identify the
 	// client: CIDRs, addresses, or the keywords "private" and "none".
 	TrustedProxies []string
+	// DisallowUserRegistration keeps self-service sign-up closed whatever the
+	// stored instance setting says. Tofu (2026-10-25): added for Tofu's gallery copy.
+	DisallowUserRegistration bool
 }
 
 func checkDataDir(dataDir string) (string, error) {

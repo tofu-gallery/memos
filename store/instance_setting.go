@@ -226,6 +226,13 @@ func (s *Store) GetInstanceGeneralSetting(ctx context.Context) (*storepb.Instanc
 		Key:   storepb.InstanceSettingKey_GENERAL,
 		Value: &storepb.InstanceSetting_GeneralSetting{GeneralSetting: instanceGeneralSetting},
 	})
+	// Tofu (2026-10-25): MEMOS_DISALLOW_USER_REGISTRATION=true (--disallow-user-registration) keeps self-service
+	// sign-up closed whatever the stored setting says, so an owner can close it from the app's settings on the host.
+	// It never opens a sign-up the stored setting closed, and the first account (the admin) can still be created.
+	if s.profile != nil && s.profile.DisallowUserRegistration && !instanceGeneralSetting.DisallowUserRegistration {
+		instanceGeneralSetting = proto.CloneOf(instanceGeneralSetting)
+		instanceGeneralSetting.DisallowUserRegistration = true
+	}
 	return instanceGeneralSetting, nil
 }
 
