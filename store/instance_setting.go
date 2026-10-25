@@ -374,6 +374,11 @@ func (s *Store) GetInstanceStorageSetting(ctx context.Context) (*storepb.Instanc
 	instanceStorageSetting := &storepb.InstanceStorageSetting{}
 	if stored != nil {
 		instanceStorageSetting = proto.CloneOf(stored)
+	} else if s.profile != nil && s.profile.Driver == "postgres" {
+		// Tofu (2026-10-25): on PostgreSQL, with no storage setting saved yet, new attachments go to the database
+		// rather than the local disk, because a container on Tofu has no disk that survives a restart and Tofu's
+		// database is PostgreSQL. A saved setting always wins, and SQLite and MySQL keep upstream's default.
+		instanceStorageSetting.StorageType = storepb.InstanceStorageSetting_DATABASE
 	}
 	NormalizeInstanceStorageSetting(instanceStorageSetting)
 	if instanceStorageSetting.StorageType == storepb.InstanceStorageSetting_STORAGE_TYPE_UNSPECIFIED {
