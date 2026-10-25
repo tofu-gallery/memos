@@ -137,6 +137,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.initializeInstanceAccessSetting(ctx); err != nil {
 		return errors.Wrap(err, "failed to initialize instance access setting")
 	}
+	// Tofu (2026-10-25): close Memos' tables to Supabase's Data API (store/tofu_data_api.go). A failure is logged
+	// rather than stopping the server, which works either way.
+	if err := s.closeTablesToDataAPI(ctx); err != nil {
+		slog.Warn("could not enable row-level security on Memos' tables", slog.String("error", err.Error()))
+	}
 	return nil
 }
 
