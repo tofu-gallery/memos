@@ -22,6 +22,23 @@ export const uploadService = {
       }),
       totalSize: BigInt(file.size),
     });
+    // Tofu (2026-10-25): a file that fits in one chunk goes up in a single call carrying the spec, the bytes and
+    // finishWrite, which the server accepts. Such an upload never depends on server memory between two calls, so it
+    // also works when a host runs more than one instance. It is not retried: a retry after a lost response could
+    // store the file twice. Larger files keep upstream's chunked path below.
+    if (file.size <= DEFAULT_CHUNK_SIZE) {
+      const response = await attachmentServiceClient.uploadAttachment(
+        {
+          upload: { case: "spec", value: spec },
+          writeOffset: 0n,
+          data: new Uint8Array(await file.arrayBuffer()),
+          finishWrite: true,
+        },
+        { signal },
+      );
+      if (!response.attachment) throw new Error("Upload completed without an attachment");
+      return response.attachment;
+    }
     // The spec call carries no data so that retrying it after a lost response
     // can at worst orphan an upload, never create a duplicate attachment.
     const initial = await attachmentServiceClient.uploadAttachment({ upload: { case: "spec", value: spec } }, { signal });
