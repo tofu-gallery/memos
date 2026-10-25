@@ -9,7 +9,9 @@ coverage.out
 /.worktrees/
 
 # Not used by the image build
-/web/
+# Tofu (2026-10-25): the root Dockerfile builds web/ in its first stage, so only its local output stays out.
+/web/node_modules/
+/web/dist/
 /docs/
 /.github/
 *.md
