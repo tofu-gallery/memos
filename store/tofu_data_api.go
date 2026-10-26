@@ -1,8 +1,8 @@
 package store
 
 // Tofu (2026-10-25): this file is Tofu's addition; it is not part of upstream Memos.
-// Tofu (2026-10-26): it now sends its statements in two round trips, covers every table Memos' role owns in its
-// schema, not only LATEST.sql's, and can run inside a caller's transaction (closeTablesToDataAPIInTx).
+// Tofu (2026-10-26): it now runs inside a transaction that holds the schema lock (tofu_start_lock.go), sends its
+// statements in two round trips, and covers every table Memos' role owns in its schema, not only LATEST.sql's.
 
 import (
 	"context"
@@ -14,8 +14,9 @@ import (
 )
 
 // closeTablesToDataAPI turns on row-level security for Memos' tables on a Supabase database (see
-// closeTablesToDataAPIInTx), in a transaction of its own. On any other PostgreSQL, and on SQLite and MySQL, it does
-// nothing.
+// closeTablesToDataAPIInTx), in a transaction of its own that holds the schema lock, so that it never runs beside
+// another start's schema step. On an empty database the schema step has done it already; this covers a database
+// whose tables were made without it. On any other PostgreSQL, and on SQLite and MySQL, it does nothing.
 func (s *Store) closeTablesToDataAPI(ctx context.Context) error {
 	if s.profile == nil || s.profile.Driver != "postgres" {
 		return nil
@@ -25,6 +26,9 @@ func (s *Store) closeTablesToDataAPI(ctx context.Context) error {
 		return errors.Wrap(err, "failed to start transaction")
 	}
 	defer tx.Rollback()
+	if err := tofuLockSchema(ctx, tx); err != nil {
+		return err
+	}
 	if err := s.closeTablesToDataAPIInTx(ctx, tx); err != nil {
 		return err
 	}

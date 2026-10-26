@@ -123,7 +123,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// Apply migrations if needed.
 	if isVersionEmpty(instanceBasicSetting.SchemaVersion) || version.IsVersionGreaterThan(currentSchemaVersion, instanceBasicSetting.SchemaVersion) {
 		s.prepareUniqueEmailMigration(ctx, instanceBasicSetting.SchemaVersion, currentSchemaVersion)
-		if err := s.applyMigrations(ctx, instanceBasicSetting.SchemaVersion, currentSchemaVersion); err != nil {
+		err := s.applyMigrations(ctx, instanceBasicSetting.SchemaVersion, currentSchemaVersion)
+		// Tofu (2026-10-26): a start that meets an object made beside it tries the migrations once more
+		// (store/tofu_start_lock.go).
+		if err != nil && s.profile.Driver == "postgres" && tofuDuplicateObject(err) {
+			slog.Warn("the migrations met an object made beside them; trying them once more", slog.String("error", err.Error()))
+			err = s.applyMigrations(ctx, instanceBasicSetting.SchemaVersion, currentSchemaVersion)
+		}
+		if err != nil {
 			return errors.Wrap(err, "failed to apply migrations")
 		}
 	}
@@ -138,7 +145,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return errors.Wrap(err, "failed to initialize instance access setting")
 	}
 	// Tofu (2026-10-25): close Memos' tables to Supabase's Data API (store/tofu_data_api.go). A failure is logged
-	// rather than stopping the server, which works either way.
+	// rather than stopping the server, which works either way. Tofu (2026-10-26): on an empty database the schema step
+	// above has done it already, inside its own transaction; this covers a database whose tables were made without it.
 	if err := s.closeTablesToDataAPI(ctx); err != nil {
 		slog.Warn("could not enable row-level security on Memos' tables", slog.String("error", err.Error()))
 	}
@@ -183,6 +191,19 @@ func (s *Store) applyMigrations(ctx context.Context, currentSchemaVersion, targe
 	}
 	defer tx.Rollback()
 
+	// Tofu (2026-10-26): on PostgreSQL this transaction holds the schema lock, and the schema version is read again
+	// inside it, so that several starts at once apply the migrations once (store/tofu_start_lock.go).
+	if s.profile.Driver == "postgres" {
+		storedSchemaVersion, done, err := s.tofuLockMigrations(ctx, tx, targetSchemaVersion)
+		if err != nil {
+			return err
+		}
+		if done {
+			return tx.Commit()
+		}
+		currentSchemaVersion = storedSchemaVersion
+	}
+
 	// Use safe version for comparison (handles empty version case)
 	schemaVersionForComparison := getSchemaVersionOrDefault(currentSchemaVersion)
 	if isVersionEmpty(currentSchemaVersion) {
@@ -225,11 +246,24 @@ func (s *Store) applyMigrations(ctx context.Context, currentSchemaVersion, targe
 		}
 	}
 
+	// Tofu (2026-10-26): on PostgreSQL the new schema version is saved in this transaction, with row-level security
+	// for any table the migrations made, instead of after it (store/tofu_start_lock.go).
+	if s.profile.Driver == "postgres" {
+		if err := s.tofuFinishMigrations(ctx, tx, targetSchemaVersion); err != nil {
+			return err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return errors.Wrap(err, "failed to commit migration transaction")
 	}
 
 	slog.Info("migration completed", slog.Int("migrationsApplied", migrationsApplied))
+
+	if s.profile.Driver == "postgres" {
+		s.instanceSettingCache.Delete(ctx, storepb.InstanceSettingKey_BASIC.String())
+		return nil
+	}
 
 	// Update schema version after successful migration
 	if err := s.updateCurrentSchemaVersion(ctx, targetSchemaVersion); err != nil {
@@ -246,7 +280,13 @@ func (s *Store) preMigrate(ctx context.Context) error {
 		return errors.Wrap(err, "failed to check if database is initialized")
 	}
 
-	if !initialized {
+	// Tofu (2026-10-26): on PostgreSQL an empty database is set up in one transaction that holds the schema lock, with
+	// its schema version and signing key, so that several starts at once leave one schema (store/tofu_start_lock.go).
+	if !initialized && s.profile.Driver == "postgres" {
+		if err := s.tofuInitializeSchema(ctx); err != nil {
+			return err
+		}
+	} else if !initialized {
 		filePath := s.getMigrationBasePath() + LatestSchemaFileName
 		bytes, err := migrationFS.ReadFile(filePath)
 		if err != nil {
