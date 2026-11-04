@@ -1,6 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { afterEach, describe, expect, it } from "vitest";
-import { AttachmentSchema, MotionMediaFamily, MotionMediaRole, MotionMediaSchema } from "@/types/proto/api/v1/attachment_service_pb";
+import { AttachmentSchema, MotionMediaFamily, MotionMediaRole, MotionMediaSchema } from "@/types/proto/api/attachment_service_pb";
 import {
   buildManagedAttachmentMarkdown,
   extractManagedAttachmentUIDs,
@@ -113,6 +113,37 @@ describe("managed attachment Markdown", () => {
     expect(removeManagedAttachmentReferences(content, new Set(["remove-me"]))).toBe(
       ["before", "", "keep ![other](/file/attachments/keep-me) here", "", "`![code](/file/attachments/remove-me)`"].join("\n"),
     );
+  });
+
+  it("removes images inside quotes, lists and table cells at their place in the source", () => {
+    const content = [
+      "> quote ![a](/file/attachments/remove-me) end",
+      "> - item ![b](/file/attachments/remove-me)",
+      "",
+      "| x | y |",
+      "| --- | --- |",
+      "| ![c](/file/attachments/remove-me) | ![d](/file/attachments/keep-me) |",
+    ].join("\n");
+
+    expect(removeManagedAttachmentReferences(content, new Set(["remove-me"]))).toBe(
+      ["> quote  end", "> - item ", "", "| x | y |", "| --- | --- |", "|  | ![d](/file/attachments/keep-me) |"].join("\n"),
+    );
+  });
+
+  it("reports the first invalid reference in document order, HTML included", () => {
+    const content = [
+      'Inline <img src="/file/attachments/a">',
+      "",
+      "![bad](/file/attachments/a?x=1)",
+      "",
+      "<div>/file/attachments/b</div>",
+    ].join("\n");
+
+    expect(findInvalidManagedAttachmentReferences(content)).toEqual([
+      '<img src="/file/attachments/a">',
+      "/file/attachments/a?x=1",
+      "<div>/file/attachments/b</div>",
+    ]);
   });
 
   it("filters the entire motion group when its still image is inline", () => {

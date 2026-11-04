@@ -25,7 +25,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 COPY --from=frontend /frontend-build/server/frontend/dist ./server/frontend/dist
 
-ARG VERSION=0.31.0
+# Tofu (2026-11-04): since 26.10, upstream's server refuses to start unless its version is a calendar version
+# (YY.MM.N[-rc.K] for a release, YY.MM.D-dev.<sha7> for any other build; internal/version.Validate), and the build
+# context has no .git to derive one from. The default is what upstream's `scripts/release_version.sh
+# development-version` prints for the upstream commit merged into `tofu` last (b40d8a7b, committed 2026-11-01).
+ARG VERSION=26.11.1-dev.b40d8a7
 ARG COMMIT=unknown
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

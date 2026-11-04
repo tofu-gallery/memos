@@ -173,7 +173,7 @@ function scanSegment(source: string, from: number, limit: number): SegmentMatch 
  * Scan one tag candidate beginning at `from`.
  *
  * Offsets are UTF-16 offsets so callers can use them directly with Markdown
- * source positions and CodeMirror ranges.
+ * source positions and editor offsets.
  */
 export function scanTagAt(source: string, from: number, limit = source.length): TagMatch | undefined {
   if (!isTagIntroducerAt(source, from, limit)) return undefined;
@@ -223,4 +223,10 @@ export function findTagMatches(source: string, from = 0, limit = source.length):
   }
 
   return matches;
+}
+
+/** Whether `value` written as `#value` scans as exactly one complete tag with nothing left over. */
+export function isCompleteTagValue(value: string): boolean {
+  const match = scanTagAt(`#${value}`, 0);
+  return match?.value === value && match.to === value.length + 1;
 }

@@ -10,23 +10,28 @@ import UserAvatar from "@/components/UserAvatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { userServiceClient } from "@/connect";
+import { findManagedResource, useConfigurationStatus } from "@/hooks/useConfigurationQueries";
 import useCurrentUser from "@/hooks/useCurrentUser";
 import { useDialog } from "@/hooks/useDialog";
 import { useDeleteUser, useListUsers } from "@/hooks/useUserQueries";
 import { handleError } from "@/lib/error";
-import { State } from "@/types/proto/api/v1/common_pb";
-import { User, User_Role } from "@/types/proto/api/v1/user_service_pb";
+import { State } from "@/types/proto/api/common_pb";
+import { User, User_Role } from "@/types/proto/api/user_service_pb";
 import { useTranslate } from "@/utils/i18n";
 import CreateUserDialog from "../CreateUserDialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
+import ManagedByConfigurationChip from "./ManagedByConfigurationChip";
 import SettingSection from "./SettingSection";
 import SettingTable from "./SettingTable";
+import { useExportMemos } from "./useExportMemos";
 
 const MemberSection = () => {
   const t = useTranslate();
+  const configurationStatus = useConfigurationStatus();
   const currentUser = useCurrentUser();
   const { data: users = [], refetch: refetchUsers } = useListUsers();
   const deleteUserMutation = useDeleteUser();
+  const { exportMemos, exporting } = useExportMemos();
   const createDialog = useDialog();
   const editDialog = useDialog();
   const [editingUser, setEditingUser] = useState<User | undefined>();
@@ -123,7 +128,7 @@ const MemberSection = () => {
             header: t("setting.member.member-column"),
             render: (_, user: User) => (
               <div className="flex min-w-[18rem] items-start gap-3">
-                <UserAvatar className="h-10 w-10 shrink-0 rounded-xl" avatarUrl={user.avatarUrl} />
+                <UserAvatar className="h-10 w-10 shrink-0" avatarUrl={user.avatarUrl} name={user.displayName || user.username} />
                 <div className="flex min-w-0 flex-1 flex-col">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span
@@ -146,16 +151,17 @@ const MemberSection = () => {
             render: (_, user: User) => (
               <div className="flex min-w-[18rem] flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="secondary" className="rounded-full px-2.5 py-0.5">
+                  <Badge variant="neutral" shape="pill">
                     {stringifyUserRole(user.role)}
                   </Badge>
-                  <Badge variant={user.state === State.ARCHIVED ? "outline" : "default"} className="rounded-full px-2.5 py-0.5">
+                  <Badge variant={user.state === State.ARCHIVED ? "outline" : "neutral"} shape="pill">
                     {user.state === State.ARCHIVED ? t("setting.member.archived") : t("setting.member.active")}
                   </Badge>
                 </div>
-                {user.email ? (
+                {user.email || findManagedResource(configurationStatus, user.name) ? (
                   <div className="flex flex-wrap gap-2">
-                    <InfoChip label={t("common.email")} value={user.email} tooltip={user.email} />
+                    {user.email ? <InfoChip label={t("common.email")} value={user.email} tooltip={user.email} /> : null}
+                    <ManagedByConfigurationChip resource={findManagedResource(configurationStatus, user.name)} />
                   </div>
                 ) : null}
               </div>
@@ -173,14 +179,19 @@ const MemberSection = () => {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" sideOffset={2}>
                     <DropdownMenuItem onClick={() => handleEditUser(user)}>{t("common.update")}</DropdownMenuItem>
+                    <DropdownMenuItem disabled={exporting} onClick={() => exportMemos(user.username)}>
+                      {t("setting.member.export-memos")}
+                    </DropdownMenuItem>
                     {user.state === State.NORMAL ? (
                       <DropdownMenuItem onClick={() => handleArchiveUserClick(user)}>{t("setting.member.archive-member")}</DropdownMenuItem>
                     ) : (
                       <>
                         <DropdownMenuItem onClick={() => handleRestoreUserClick(user)}>{t("common.restore")}</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleDeleteUserClick(user)} className="text-destructive focus:text-destructive">
-                          {t("setting.member.delete-member")}
-                        </DropdownMenuItem>
+                        {findManagedResource(configurationStatus, user.name) ? null : (
+                          <DropdownMenuItem onClick={() => handleDeleteUserClick(user)} className="text-destructive focus:text-destructive">
+                            {t("setting.member.delete-member")}
+                          </DropdownMenuItem>
+                        )}
                       </>
                     )}
                   </DropdownMenuContent>

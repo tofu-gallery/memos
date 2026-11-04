@@ -3,7 +3,6 @@ import { ArrowUpLeftFromCircleIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo as useReactMemo, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useParams } from "react-router-dom";
 import MemoCommentSection, { type MemoCommentSectionHandle } from "@/components/MemoCommentSection";
-import { MentionResolutionProvider } from "@/components/MemoContent/MentionResolutionContext";
 import MemoParentPlaceholder, { type MemoParentStatus } from "@/components/MemoParentPlaceholder";
 import MemoView, { type MemoViewHandle } from "@/components/MemoView";
 import { computeCommentAmount } from "@/components/MemoView/MemoViewContext";
@@ -11,15 +10,18 @@ import { createMemoNavigationState, resolveMemoDetailOrigin } from "@/components
 import { useAppSidebar } from "@/contexts/AppSidebarContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useInstance } from "@/contexts/InstanceContext";
+import { MentionResolutionProvider } from "@/contexts/MentionResolutionContext";
 import useMemoDetailError from "@/hooks/useMemoDetailError";
 import { useInfiniteMemoComments, useMemo } from "@/hooks/useMemoQueries";
 import { useSharedMemo, withShareAttachmentLinks } from "@/hooks/useMemoShareQueries";
 import { LEGACY_MEMO_COMMENTS_ANCHOR_ID, MEMO_COMMENTS_ANCHOR_ID } from "@/lib/memo-comments";
 import { memoNamePrefix } from "@/lib/resource-names";
+import { isMemoBlurred } from "@/lib/tag";
 import { ROUTES } from "@/router/routes";
-import type { Attachment } from "@/types/proto/api/v1/attachment_service_pb";
-import { State } from "@/types/proto/api/v1/common_pb";
-import type { Memo } from "@/types/proto/api/v1/memo_service_pb";
+import type { Attachment } from "@/types/proto/api/attachment_service_pb";
+import { State } from "@/types/proto/api/common_pb";
+import type { Memo } from "@/types/proto/api/memo_service_pb";
+import { useTranslate } from "@/utils/i18n";
 import { findMemoAnchorTarget } from "@/utils/markdown-manipulation";
 
 const MemoSidebarRegistration = ({
@@ -28,9 +30,9 @@ const MemoSidebarRegistration = ({
   parentStatus,
   onParentRetry,
   from,
-  hasExplicitOrigin,
   commentCount,
   readonly,
+  contentHidden,
   onEdit,
   onCommentsOpen,
   onCommentCreate,
@@ -41,9 +43,9 @@ const MemoSidebarRegistration = ({
   parentStatus?: MemoParentStatus;
   onParentRetry?: () => void;
   from: string;
-  hasExplicitOrigin: boolean;
   commentCount?: number;
   readonly: boolean;
+  contentHidden: boolean;
   onEdit: () => void;
   onCommentsOpen: () => void;
   onCommentCreate: () => void;
@@ -58,9 +60,9 @@ const MemoSidebarRegistration = ({
       parentStatus,
       onParentRetry,
       from,
-      hasExplicitOrigin,
       commentCount,
       readonly,
+      contentHidden,
       onEdit,
       onCommentsOpen,
       onCommentCreate,
@@ -68,8 +70,8 @@ const MemoSidebarRegistration = ({
     });
   }, [
     commentCount,
+    contentHidden,
     from,
-    hasExplicitOrigin,
     memo,
     onCommentCreate,
     onCommentsOpen,
@@ -88,7 +90,8 @@ const MemoSidebarRegistration = ({
 };
 
 const MemoDetail = () => {
-  const { currentUser, isInitialized: authInitialized } = useAuth();
+  const t = useTranslate();
+  const { currentUser, isInitialized: authInitialized, userTagsSetting } = useAuth();
   const { isInitialized: instanceInitialized } = useInstance();
   const [shareImageDialogOpen, setShareImageDialogOpen] = useState(false);
   const params = useParams();
@@ -122,6 +125,11 @@ const MemoDetail = () => {
   const resolvedOrigin = resolveMemoDetailOrigin(locationState, { memoArchived: memo?.state === State.ARCHIVED });
   const parentPage = !hasExplicitOrigin && !currentUser && memo?.state !== State.ARCHIVED ? ROUTES.EXPLORE : resolvedOrigin;
   const memoName = memo?.name ?? memoNameFromParams;
+  // Keyed by memo so another memo never renders revealed; cleared on leave so returning blurs again.
+  const [blurRevealedMemoName, setBlurRevealedMemoName] = useState<string>();
+  const showBlurredContent = blurRevealedMemoName === memoName;
+  const handleShowBlurredContentChange = useCallback((show: boolean) => setBlurRevealedMemoName(show ? memoName : undefined), [memoName]);
+  useEffect(() => setBlurRevealedMemoName(undefined), [memoName]);
   const displayMemo = useReactMemo(() => {
     if (!memo) return undefined;
     if (!isShareMode) return memo;
@@ -220,6 +228,8 @@ const MemoDetail = () => {
   if (isLoading || !memo || !displayMemo || !authInitialized || !instanceInitialized) {
     return null;
   }
+  const contentHidden = isMemoBlurred(displayMemo, userTagsSetting) && !showBlurredContent;
+  const parentBlurred = !!parentMemo && isMemoBlurred(parentMemo, userTagsSetting);
   const mentionResolutionContents = [displayMemo.content, ...comments.map((comment) => comment.content)];
   const userResolutionNames = Array.from(
     new Set([displayMemo, ...comments].flatMap((item) => [item.creator, ...(item.reactions ?? []).map((reaction) => reaction.creator)])),
@@ -233,9 +243,9 @@ const MemoDetail = () => {
           parentStatus={parentStatus}
           onParentRetry={handleParentRetry}
           from={parentPage}
-          hasExplicitOrigin={hasExplicitOrigin}
           commentCount={isShareMode ? undefined : commentCount}
           readonly={isShareMode}
+          contentHidden={contentHidden}
           onEdit={handleEdit}
           onCommentsOpen={handleCommentsOpen}
           onCommentCreate={handleCommentCreate}
@@ -257,7 +267,7 @@ const MemoDetail = () => {
                   viewTransition
                 >
                   <ArrowUpLeftFromCircleIcon className="w-4 h-auto shrink-0 opacity-60 mr-2" />
-                  <span className="truncate">{parentMemo.content}</span>
+                  <span className="truncate">{parentBlurred ? t("memo.parent-memo") : parentMemo.content}</span>
                 </Link>
               </div>
             )}
@@ -268,6 +278,8 @@ const MemoDetail = () => {
               compact={false}
               parentPage={parentPage}
               shareImageDialogOpen={shareImageDialogOpen}
+              showBlurredContent={showBlurredContent}
+              onShowBlurredContentChange={handleShowBlurredContentChange}
               showCreator
               showVisibility
               showPinned

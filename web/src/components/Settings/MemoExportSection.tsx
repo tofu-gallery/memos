@@ -9,13 +9,14 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import useCurrentUser from "@/hooks/useCurrentUser";
 import { getErrorMessage } from "@/lib/error";
-import { exportMemos, importStagedMemos, type StagedMemoImport, stageMemoImport } from "@/lib/memo-export";
-import type { MemoImportIssue, MemoImportReport } from "@/types/proto/api/v1/user_service_pb";
-import { ImportMemosRequest_ConflictPolicy } from "@/types/proto/api/v1/user_service_pb";
+import { importStagedMemos, type StagedMemoImport, stageMemoImport } from "@/lib/memo-export";
+import type { ImportMemosIssue, ImportMemosReport } from "@/types/proto/api/user_service_pb";
+import { ImportMemosRequest_ConflictPolicy, User_Role } from "@/types/proto/api/user_service_pb";
 import { useTranslate } from "@/utils/i18n";
 import SettingGroup from "./SettingGroup";
 import { SettingList, SettingListItem, StatRow } from "./SettingList";
 import SettingSection from "./SettingSection";
+import { useExportMemos } from "./useExportMemos";
 
 const POLICIES = [
   {
@@ -41,14 +42,14 @@ const POLICIES = [
 type ImportStage =
   | { kind: "idle" }
   | { kind: "review"; file: File; staged: StagedMemoImport; policy: ImportMemosRequest_ConflictPolicy }
-  | { kind: "done"; report: MemoImportReport };
+  | { kind: "done"; report: ImportMemosReport };
 
-const IssueList = ({ issues, tone }: { issues: MemoImportIssue[]; tone: "warning" | "failure" }) => {
+const IssueList = ({ issues, tone }: { issues: ImportMemosIssue[]; tone: "warning" | "failure" }) => {
   if (issues.length === 0) return null;
   return (
     <ul className={`flex flex-col gap-1 text-xs ${tone === "failure" ? "text-destructive" : "text-muted-foreground"}`}>
       {issues.map((issue, index) => (
-        <li key={`${tone}-${index}`}>{issue.memo ? `${issue.memo}: ${issue.message}` : issue.message}</li>
+        <li key={`${tone}-${index}`}>{issue.memoUid ? `${issue.memoUid}: ${issue.message}` : issue.message}</li>
       ))}
     </ul>
   );
@@ -58,22 +59,10 @@ const MemoExportSection = () => {
   const t = useTranslate();
   const user = useCurrentUser();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [exporting, setExporting] = useState(false);
+  const { exportMemos, exporting } = useExportMemos();
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<ImportStage>({ kind: "idle" });
-
-  const handleExport = async () => {
-    if (!user) return;
-    setExporting(true);
-    try {
-      await exportMemos(user.name, user.username);
-      toast.success(t("setting.memo-export.export-success"));
-    } catch (error) {
-      toast.error(getErrorMessage(error, t("setting.memo-export.export-failed")));
-    } finally {
-      setExporting(false);
-    }
-  };
+  const isAdmin = user?.role === User_Role.ADMIN;
 
   const handleFileChosen = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -112,15 +101,20 @@ const MemoExportSection = () => {
 
   return (
     <SettingSection title={t("setting.memo-export.label")} description={t("setting.memo-export.description")}>
-      <SettingGroup title={t("setting.memo-export.export-title")} description={t("setting.memo-export.export-description")}>
-        <SettingList>
-          <SettingListItem label={t("setting.memo-export.export-label")} description={t("setting.memo-export.export-detail")}>
-            <Button variant="outline" size="sm" disabled={exporting} onClick={handleExport}>
-              <DownloadIcon className="w-4 h-4 mr-1.5" />
-              {exporting ? t("setting.memo-export.exporting") : t("setting.memo-export.export-action")}
-            </Button>
-          </SettingListItem>
-        </SettingList>
+      <SettingGroup
+        title={t("setting.memo-export.export-title")}
+        description={isAdmin ? t("setting.memo-export.export-description") : t("setting.memo-export.export-admin-only")}
+      >
+        {isAdmin && (
+          <SettingList>
+            <SettingListItem label={t("setting.memo-export.export-label")} description={t("setting.memo-export.export-detail")}>
+              <Button variant="outline" size="sm" disabled={exporting} onClick={() => exportMemos(user.username)}>
+                <DownloadIcon className="w-4 h-4 mr-1.5" />
+                {exporting ? t("setting.memo-export.exporting") : t("setting.memo-export.export-action")}
+              </Button>
+            </SettingListItem>
+          </SettingList>
+        )}
       </SettingGroup>
 
       <SettingGroup showSeparator title={t("setting.memo-export.import-title")} description={t("setting.memo-export.import-description")}>
@@ -153,8 +147,8 @@ const MemoExportSection = () => {
                   stage.staged.plan.exportTime ? dayjs(timestampDate(stage.staged.plan.exportTime)).format("YYYY-MM-DD HH:mm") : ""
                 }`}
               />
-              <StatRow label={t("setting.memo-export.review-memos")} value={String(stage.staged.plan.memos)} />
-              <StatRow label={t("setting.memo-export.review-attachments")} value={String(stage.staged.plan.attachments)} />
+              <StatRow label={t("setting.memo-export.review-memos")} value={String(stage.staged.plan.memoCount)} />
+              <StatRow label={t("setting.memo-export.review-attachments")} value={String(stage.staged.plan.attachmentCount)} />
               <StatRow label={t("setting.memo-export.review-new")} value={String(stage.staged.plan.new + stage.staged.plan.renamed)} />
               <StatRow label={t("setting.memo-export.review-existing")} value={String(stage.staged.plan.existing)} />
             </SettingList>
@@ -190,7 +184,9 @@ const MemoExportSection = () => {
                 {t("common.cancel")}
               </Button>
               <Button size="sm" disabled={busy} onClick={handleImport}>
-                {busy ? t("setting.memo-export.importing") : t("setting.memo-export.import-confirm", { count: stage.staged.plan.memos })}
+                {busy
+                  ? t("setting.memo-export.importing")
+                  : t("setting.memo-export.import-confirm", { count: stage.staged.plan.memoCount })}
               </Button>
             </div>
           </div>

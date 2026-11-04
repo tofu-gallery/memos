@@ -12,7 +12,16 @@ import (
 )
 
 func (d *DB) CreateUser(ctx context.Context, create *store.User) (*store.User, error) {
-	if err := insertUser(ctx, d.db, create); err != nil {
+	return createUser(ctx, d.db, create)
+}
+
+// CreateUserTx is CreateUser within tx.
+func (*DB) CreateUserTx(ctx context.Context, tx *sql.Tx, create *store.User) (*store.User, error) {
+	return createUser(ctx, tx, create)
+}
+
+func createUser(ctx context.Context, q dbExecutor, create *store.User) (*store.User, error) {
+	if err := insertUser(ctx, q, create); err != nil {
 		return nil, err
 	}
 	return create, nil
@@ -24,6 +33,27 @@ func (d *DB) UpdateUser(ctx context.Context, update *store.UpdateUser) (*store.U
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	user, err := updateUser(ctx, tx, update)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// UpdateUserTx is UpdateUser within tx.
+func (*DB) UpdateUserTx(ctx context.Context, tx *sql.Tx, update *store.UpdateUser) (*store.User, error) {
+	return updateUser(ctx, tx, update)
+}
+
+func updateUser(ctx context.Context, tx *sql.Tx, update *store.UpdateUser) (*store.User, error) {
+	if update.RemovesInstanceAdmin() {
+		if err := ensureInstanceAdminRetained(ctx, tx, update.ID); err != nil {
+			return nil, err
+		}
+	}
 	if update.RowStatus != nil && *update.RowStatus == store.Archived {
 		if err := validatePostgresUserArchive(ctx, tx, update.ID); err != nil {
 			return nil, err
@@ -83,9 +113,6 @@ func (d *DB) UpdateUser(ctx context.Context, update *store.UpdateUser) (*store.U
 		return nil, err
 	}
 	user.Email = email.String
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
 	return user, nil
 }
 
@@ -118,7 +145,54 @@ func validatePostgresUserArchive(ctx context.Context, tx *sql.Tx, userID int32) 
 	return nil
 }
 
+// ensureInstanceAdminRetained refuses a mutation that would remove the last
+// active instance administrator. The target's role is read first without a
+// lock so mutations of ordinary users skip the admin scan; for an active
+// admin every caller then locks the active admin rows in id order before
+// touching the target, so concurrent removals serialize instead of each
+// seeing the other admin as still active.
+func ensureInstanceAdminRetained(ctx context.Context, tx *sql.Tx, userID int32) error {
+	var role, rowStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT role, row_status FROM "user" WHERE id = $1`, userID).Scan(&role, &rowStatus); errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if role != string(store.RoleAdmin) || rowStatus != string(store.Normal) {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM "user" WHERE role = 'ADMIN' AND row_status = 'NORMAL' ORDER BY id FOR UPDATE`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	adminCount := 0
+	for rows.Next() {
+		var id int32
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		adminCount++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if adminCount <= 1 {
+		return store.ErrLastInstanceAdmin
+	}
+	return nil
+}
+
 func (d *DB) ListUsers(ctx context.Context, find *store.FindUser) ([]*store.User, error) {
+	return listUsers(ctx, d.db, find)
+}
+
+// ListUsersTx is ListUsers within tx.
+func (*DB) ListUsersTx(ctx context.Context, tx *sql.Tx, find *store.FindUser) ([]*store.User, error) {
+	return listUsers(ctx, tx, find)
+}
+
+func listUsers(ctx context.Context, q dbExecutor, find *store.FindUser) ([]*store.User, error) {
 	where, args := []string{"1 = 1"}, []any{}
 	orderBy := []string{"created_ts DESC", "row_status DESC", "id DESC"}
 
@@ -194,7 +268,7 @@ func (d *DB) ListUsers(ctx context.Context, find *store.FindUser) ([]*store.User
 			query += fmt.Sprintf(" OFFSET %d", *v)
 		}
 	}
-	rows, err := d.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

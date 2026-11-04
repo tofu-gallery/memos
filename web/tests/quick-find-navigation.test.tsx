@@ -116,6 +116,22 @@ describe("Quick Find navigation", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("keeps keyboard focus on the mode tabs while preserving the draft", async () => {
+    renderSearch();
+    openQuickFind();
+    fireEvent.change(await screen.findByRole("textbox"), { target: { value: "pinned" } });
+    const textTab = screen.getByRole("tab", { name: "search.text" });
+    act(() => textTab.focus());
+    fireEvent.keyDown(textTab, { key: "ArrowRight" });
+    const expressionTab = screen.getByRole("tab", { name: "search.expression-mode" });
+    await waitFor(() => expect(expressionTab).toHaveFocus());
+    expect(expressionTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("textbox")).toHaveValue("pinned");
+    fireEvent.keyDown(expressionTab, { key: "ArrowLeft" });
+    await waitFor(() => expect(textTab).toHaveFocus());
+    expect(textTab).toHaveAttribute("aria-selected", "true");
+  });
+
   it("restores the expression from its chip and discards cancelled changes", async () => {
     state.filters = [
       { factor: "celSearch", value: "pinned\n || has_code" },
@@ -169,7 +185,7 @@ describe("Quick Find navigation", () => {
     expect(state.filters.filter((filter) => !predicate(filter))).toEqual([{ factor: "tagSearch", value: "work" }]);
   });
 
-  it("searches from Inbox into global Home in one history step", async () => {
+  it("searches from Inbox into global Explore in one history step", async () => {
     const router = renderSearch("/inbox");
 
     expect(screen.getByTestId("scope")).toHaveTextContent("all");
@@ -178,7 +194,7 @@ describe("Quick Find navigation", () => {
     fireEvent.change(input, { target: { value: "roadmap" } });
     fireEvent.submit(input.closest("form")!);
 
-    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent("/?filter=contentSearch%3Aroadmap"));
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent("/explore?filter=contentSearch%3Aroadmap"));
     expect(state.setFilters).not.toHaveBeenCalled();
     expect(screen.getByTestId("scope")).toHaveTextContent("all");
 
@@ -222,7 +238,7 @@ describe("Quick Find navigation", () => {
     fireEvent.change(input, { target: { value: "roadmap" } });
     fireEvent.submit(input.closest("form")!);
 
-    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent("/?filter=contentSearch%3Aroadmap"));
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent("/explore?filter=contentSearch%3Aroadmap"));
 
     await act(async () => {
       await router.navigate(-1);

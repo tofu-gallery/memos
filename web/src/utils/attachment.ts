@@ -1,11 +1,11 @@
-import { Attachment, MotionMediaFamily, MotionMediaRole } from "@/types/proto/api/v1/attachment_service_pb";
+import { Attachment, MotionMediaFamily, MotionMediaRole } from "@/types/proto/api/attachment_service_pb";
 
 export const getAttachmentUrl = (attachment: Attachment) => {
   if (attachment.externalLink) {
     return attachment.externalLink;
   }
 
-  return `${window.location.origin}/file/${attachment.name}/${attachment.filename}`;
+  return `${window.location.origin}/file/${attachment.name}/${encodeURIComponent(attachment.filename)}`;
 };
 
 // Appends a thumbnail or motion selector only to share-mode links; other external links fall back to the server-managed attachment URL.
@@ -27,7 +27,7 @@ export const getAttachmentThumbnailUrl = (attachment: Attachment) => {
     return shareUrl;
   }
 
-  return `${window.location.origin}/file/${attachment.name}/${attachment.filename}?thumbnail=true`;
+  return `${window.location.origin}/file/${attachment.name}/${encodeURIComponent(attachment.filename)}?thumbnail=true`;
 };
 
 export const getAttachmentMotionClipUrl = (attachment: Attachment) => {
@@ -36,7 +36,7 @@ export const getAttachmentMotionClipUrl = (attachment: Attachment) => {
     return shareUrl;
   }
 
-  return `${window.location.origin}/file/${attachment.name}/${attachment.filename}?motion=true`;
+  return `${window.location.origin}/file/${attachment.name}/${encodeURIComponent(attachment.filename)}?motion=true`;
 };
 
 export const getAttachmentType = (attachment: Attachment) => {

@@ -109,6 +109,19 @@ func TestRenderSpaceFilters(t *testing.T) {
 	}
 }
 
+func TestRenderAttachmentCreatorFilter(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(NewAttachmentSchema())
+	require.NoError(t, err)
+	for _, dialect := range []DialectName{DialectSQLite, DialectMySQL, DialectPostgres} {
+		statement, err := engine.CompileToStatement(context.Background(), `creator == "users/alice"`, RenderOptions{Dialect: dialect})
+		require.NoError(t, err, dialect)
+		require.Contains(t, statement.SQL, "CASE WHEN", dialect)
+		require.Equal(t, []any{"users/alice"}, statement.Args, dialect)
+	}
+}
+
 func TestCompileContainsEscapesLikeWildcards(t *testing.T) {
 	t.Parallel()
 
@@ -644,6 +657,218 @@ func TestHasLocationSQLiteBehavior(t *testing.T) {
 		{`!has_location`, []int{1, 4, 5}},
 		{`has_location == false`, []int{1, 4, 5}},
 		{`has_location != false`, []int{2, 3}},
+	}
+	for _, tc := range cases {
+		stmt, err := engine.CompileToStatement(context.Background(), tc.expr, RenderOptions{Dialect: DialectSQLite})
+		require.NoError(t, err, tc.expr)
+		require.Equal(t, tc.want, selectMemoIDs(t, db, stmt), tc.expr)
+	}
+}
+
+func TestRenderJSONBoolComparisonsPerDialect(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(NewSchema())
+	require.NoError(t, err)
+
+	predicates := map[DialectName]string{
+		DialectSQLite:   "JSON_EXTRACT(`memo`.`payload`, '$.property.hasLink') IS TRUE",
+		DialectMySQL:    "COALESCE(JSON_EXTRACT(`memo`.`payload`, '$.property.hasLink'), CAST('false' AS JSON)) = CAST('true' AS JSON)",
+		DialectPostgres: "(memo.payload->'property'->>'hasLink')::boolean IS TRUE",
+	}
+	for dialect, predicate := range predicates {
+		cases := []struct {
+			expr string
+			sql  string
+		}{
+			{`has_link`, predicate},
+			{`!has_link`, "NOT (" + predicate + ")"},
+			{`has_link == true`, predicate},
+			{`has_link == false`, "NOT (" + predicate + ")"},
+			{`has_link != true`, "NOT (" + predicate + ")"},
+			{`has_link != false`, predicate},
+		}
+		for _, tc := range cases {
+			stmt, err := engine.CompileToStatement(context.Background(), tc.expr, RenderOptions{Dialect: dialect})
+			require.NoError(t, err, dialect, tc.expr)
+			require.Equal(t, tc.sql, stmt.SQL, dialect, tc.expr)
+			require.Empty(t, stmt.Args, dialect, tc.expr)
+		}
+	}
+}
+
+// TestJSONBoolComparisonSQLiteBehavior pins the comparison semantics of the
+// JSON boolean flags against a real database. Memo payloads omit false flags,
+// so a missing key, a missing property object and a NULL payload all count as
+// false, and `flag == false` must match the same rows as `!flag`.
+func TestJSONBoolComparisonSQLiteBehavior(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	_, err = db.Exec(`CREATE TABLE memo (id INTEGER PRIMARY KEY, payload TEXT)`)
+	require.NoError(t, err)
+
+	engine, err := NewEngine(NewSchema())
+	require.NoError(t, err)
+
+	flags := map[string]string{
+		"has_task_list":        "hasTaskList",
+		"has_link":             "hasLink",
+		"has_code":             "hasCode",
+		"has_incomplete_tasks": "hasIncompleteTasks",
+	}
+	for field, key := range flags {
+		_, err = db.Exec(`DELETE FROM memo`)
+		require.NoError(t, err)
+		for _, fixture := range []struct {
+			id      int
+			payload any
+		}{
+			{1, `{}`},
+			{2, fmt.Sprintf(`{"property":{"%s":true}}`, key)},
+			{3, fmt.Sprintf(`{"property":{"%s":false}}`, key)},
+			{4, `{"property":{}}`},
+			{5, nil},
+		} {
+			_, err = db.Exec(`INSERT INTO memo (id, payload) VALUES (?, ?)`, fixture.id, fixture.payload)
+			require.NoError(t, err)
+		}
+
+		cases := []struct {
+			expr string
+			want []int
+		}{
+			{field, []int{2}},
+			{"!" + field, []int{1, 3, 4, 5}},
+			{field + " == true", []int{2}},
+			{field + " == false", []int{1, 3, 4, 5}},
+			{field + " != true", []int{1, 3, 4, 5}},
+			{field + " != false", []int{2}},
+		}
+		for _, tc := range cases {
+			stmt, err := engine.CompileToStatement(context.Background(), tc.expr, RenderOptions{Dialect: DialectSQLite})
+			require.NoError(t, err, tc.expr)
+			require.Equal(t, tc.want, selectMemoIDs(t, db, stmt), tc.expr)
+		}
+	}
+}
+
+func TestRenderExistsComparisonsPerDialect(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(NewSchema())
+	require.NoError(t, err)
+
+	predicates := map[string]map[DialectName]string{
+		"has_attachments": {
+			DialectSQLite:   "EXISTS (SELECT 1 FROM `attachment` WHERE `attachment`.`memo_id` = `memo`.`id`)",
+			DialectMySQL:    "EXISTS (SELECT 1 FROM `attachment` WHERE `attachment`.`memo_id` = `memo`.`id`)",
+			DialectPostgres: "EXISTS (SELECT 1 FROM attachment WHERE attachment.memo_id = memo.id)",
+		},
+		"has_image": {
+			DialectSQLite: "(JSON_EXTRACT(`memo`.`payload`, '$.property.hasInlineImage') IS TRUE OR " +
+				"EXISTS (SELECT 1 FROM `attachment` WHERE `attachment`.`memo_id` = `memo`.`id` AND LOWER(`attachment`.`type`) LIKE 'image/%'))",
+			DialectMySQL: "(COALESCE(JSON_EXTRACT(`memo`.`payload`, '$.property.hasInlineImage'), CAST('false' AS JSON)) = CAST('true' AS JSON) OR " +
+				"EXISTS (SELECT 1 FROM `attachment` WHERE `attachment`.`memo_id` = `memo`.`id` AND LOWER(`attachment`.`type`) LIKE 'image/%'))",
+			DialectPostgres: "((memo.payload->'property'->>'hasInlineImage')::boolean IS TRUE OR " +
+				"EXISTS (SELECT 1 FROM attachment WHERE attachment.memo_id = memo.id AND LOWER(attachment.type) LIKE 'image/%'))",
+		},
+	}
+	for field, byDialect := range predicates {
+		for dialect, predicate := range byDialect {
+			cases := []struct {
+				expr string
+				sql  string
+			}{
+				{field, predicate},
+				{"!" + field, "NOT (" + predicate + ")"},
+				{field + " == true", predicate},
+				{field + " == false", "NOT (" + predicate + ")"},
+				{field + " != true", "NOT (" + predicate + ")"},
+				{field + " != false", predicate},
+			}
+			for _, tc := range cases {
+				stmt, err := engine.CompileToStatement(context.Background(), tc.expr, RenderOptions{Dialect: dialect})
+				require.NoError(t, err, dialect, tc.expr)
+				require.Equal(t, tc.sql, stmt.SQL, dialect, tc.expr)
+				require.Empty(t, stmt.Args, dialect, tc.expr)
+			}
+		}
+	}
+}
+
+func TestRenderExistsRejectsUnsupportedOperators(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(NewSchema())
+	require.NoError(t, err)
+	for _, expr := range []string{`has_image > false`, `has_attachments == "yes"`, `"image" in has_image`} {
+		_, err := engine.CompileToStatement(context.Background(), expr, RenderOptions{Dialect: DialectSQLite})
+		require.Error(t, err, expr)
+	}
+}
+
+// TestExistsSQLiteBehavior pins has_attachments and has_image against real
+// tables: has_attachments follows attachment.memo_id alone, and has_image is
+// true for Markdown image syntax or an attached image/* file, whatever the
+// MIME type's case, and false for other attachments and unbound uploads.
+func TestExistsSQLiteBehavior(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	_, err = db.Exec(`CREATE TABLE memo (id INTEGER PRIMARY KEY, payload TEXT)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE attachment (id INTEGER PRIMARY KEY, memo_id INTEGER, type TEXT NOT NULL DEFAULT '')`)
+	require.NoError(t, err)
+
+	for _, fixture := range []struct {
+		id      int
+		payload any
+	}{
+		{1, `{}`}, // nothing
+		{2, `{"property":{"hasInlineImage":true}}`}, // external image in content, no attachment
+		{3, `{}`}, // uploaded photo, not referenced in content
+		{4, `{}`}, // PDF attachment only
+		{5, `{"property":{"hasInlineImage":true}}`}, // managed inline image, also bound
+		{6, nil}, // NULL payload, upper-case MIME image
+		{7, `{"property":{"hasInlineImage":false}}`}, // explicit false flag, nothing attached
+	} {
+		_, err = db.Exec(`INSERT INTO memo (id, payload) VALUES (?, ?)`, fixture.id, fixture.payload)
+		require.NoError(t, err)
+	}
+	for _, attachment := range []struct {
+		memoID   any
+		mimeType string
+	}{
+		{3, "image/jpeg"},
+		{4, "application/pdf"},
+		{5, "image/png"},
+		{6, "IMAGE/HEIC"},
+		{nil, "image/png"}, // uploaded but not bound to any memo
+	} {
+		_, err = db.Exec(`INSERT INTO attachment (memo_id, type) VALUES (?, ?)`, attachment.memoID, attachment.mimeType)
+		require.NoError(t, err)
+	}
+
+	engine, err := NewEngine(NewSchema())
+	require.NoError(t, err)
+
+	cases := []struct {
+		expr string
+		want []int
+	}{
+		{`has_attachments`, []int{3, 4, 5, 6}},
+		{`!has_attachments`, []int{1, 2, 7}},
+		{`has_attachments == false`, []int{1, 2, 7}},
+		{`has_image`, []int{2, 3, 5, 6}},
+		{`!has_image`, []int{1, 4, 7}},
+		{`has_image != true`, []int{1, 4, 7}},
+		{`has_attachments && !has_image`, []int{4}},
+		{`has_image && !has_attachments`, []int{2}},
 	}
 	for _, tc := range cases {
 		stmt, err := engine.CompileToStatement(context.Background(), tc.expr, RenderOptions{Dialect: DialectSQLite})

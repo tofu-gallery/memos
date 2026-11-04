@@ -59,13 +59,22 @@ stmt, _ := engine.CompileToStatement(ctx, `has_task_list && visibility == "PUBLI
   matching are case-sensitive, without Unicode normalization; `%` and `_` in
   string operands are literal. Hierarchy works through implied ancestors already
   present in the memo tag set, not through prefix matching.
-- **Boolean Flags** — Fields such as `has_task_list` render as `IS TRUE` equality
-  checks, or comparisons against `CAST('true' AS JSON)` depending on the dialect.
+- **Boolean Flags** — Fields such as `has_task_list` render as an `IS TRUE` check
+  (a comparison against `CAST('true' AS JSON)` on MySQL). Memo payloads omit false
+  flags, so a missing key counts as false: `flag == false` and `flag != true`
+  render as the negated check and match the same memos as `!flag`.
 - **Presence Flags** — `has_location` renders as a JSON key-existence check on
   `memo.payload` (`$.location`). A missing key and an explicit JSON null both
   count as absent on every dialect; any other value — including an empty object —
   counts as present. Only `==`/`!=` against a boolean literal (or bare/negated
   use) is allowed.
+- **Related-Row Flags** — `has_attachments` renders as `EXISTS` over
+  `attachment` rows whose `memo_id` is the memo. `has_image` ORs the payload
+  flag `property.hasInlineImage` (Markdown image syntax in the content) with an
+  `EXISTS` over attachments whose `type` starts with `image/`, ignoring case.
+  These facts are read at query time because attachment binding changes without
+  the content changing; never copy them into the payload. Comparisons follow the
+  presence flags.
 - **String Matching** — `content.contains(x)`, `content.startsWith(x)`, and
   `content.endsWith(x)` render as case-insensitive `LIKE`/`ILIKE` with LIKE
   metacharacters (`%`, `_`, `\`) escaped. Available on scalar string fields whose

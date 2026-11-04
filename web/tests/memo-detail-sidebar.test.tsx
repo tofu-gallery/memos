@@ -3,19 +3,25 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import MemoDetailSidebar from "@/components/MemoDetailSidebar/MemoDetailSidebar";
-import { AttachmentSchema } from "@/types/proto/api/v1/attachment_service_pb";
-import { State } from "@/types/proto/api/v1/common_pb";
+import { AttachmentSchema } from "@/types/proto/api/attachment_service_pb";
+import { State } from "@/types/proto/api/common_pb";
 import {
   LocationSchema,
-  MemoRelation_MemoSchema,
+  MemoRelation_MemoRefSchema,
   MemoRelation_Type,
   MemoRelationSchema,
   MemoSchema,
   Visibility,
-} from "@/types/proto/api/v1/memo_service_pb";
+} from "@/types/proto/api/memo_service_pb";
+import {
+  UserSetting_TagMetadataSchema,
+  type UserSetting_TagsSetting,
+  UserSetting_TagsSettingSchema,
+} from "@/types/proto/api/user_service_pb";
 
 const copyToClipboard = vi.hoisted(() => vi.fn());
 const currentUserState = vi.hoisted(() => ({ value: { name: "users/alice" } as { name: string } | undefined }));
+const authState = vi.hoisted(() => ({ tagsSetting: undefined as UserSetting_TagsSetting | undefined }));
 
 vi.mock("copy-to-clipboard", () => ({ default: copyToClipboard }));
 vi.mock("react-hot-toast", () => ({ default: { success: vi.fn() } }));
@@ -24,6 +30,7 @@ vi.mock("@/components/MemoDetailSidebar/MemoOutline", () => ({
 }));
 vi.mock("@/components/MemoDetailSidebar/MemoSharePanel", () => ({ default: () => <div data-testid="share-panel" /> }));
 vi.mock("@/components/MemoMetadata/Relation/useResolvedRelationMemos", () => ({ useResolvedRelationMemos: () => ({}) }));
+vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ userTagsSetting: authState.tagsSetting }) }));
 vi.mock("@/contexts/InstanceContext", () => ({ useInstance: () => ({ profile: { instanceUrl: "https://memos.example/" } }) }));
 vi.mock("@/hooks/useCurrentUser", () => ({ default: () => currentUserState.value }));
 vi.mock("@/utils/i18n", () => ({
@@ -36,21 +43,49 @@ const renderSidebar = (sidebar: React.ReactNode, route = "/memos/detail") =>
 const createIncomingReference = (memoName: string, sourceName = "memos/incoming", snippet = "Incoming backlink") =>
   create(MemoRelationSchema, {
     type: MemoRelation_Type.REFERENCE,
-    memo: create(MemoRelation_MemoSchema, { name: sourceName, snippet }),
-    relatedMemo: create(MemoRelation_MemoSchema, { name: memoName }),
+    memo: create(MemoRelation_MemoRefSchema, { name: sourceName, snippet }),
+    relatedMemo: create(MemoRelation_MemoRefSchema, { name: memoName }),
   });
 
 describe("MemoDetailSidebar", () => {
   beforeEach(() => {
     copyToClipboard.mockReset();
     currentUserState.value = { name: "users/alice" };
+    authState.tagsSetting = undefined;
   });
 
-  it("returns to the scoped map with its filters, viewport, and selection", () => {
-    const parentPage = "/spaces/travel/map?filter=tagSearch%3Atravel&lat=35&lng=135&zoom=12&memo=memos%2Fdetail";
-    renderSidebar(<MemoDetailSidebar memo={create(MemoSchema, { name: "memos/detail" })} parentPage={parentPage} hasExplicitOrigin />);
+  it("keeps a blurred memo's headings and a blurred parent's text out of the sidebar", () => {
+    authState.tagsSetting = create(UserSetting_TagsSettingSchema, {
+      tags: { secret: create(UserSetting_TagMetadataSchema, { blurContent: true }) },
+    });
+    const memo = create(MemoSchema, {
+      name: "memos/detail",
+      state: State.NORMAL,
+      content: "# Secret plan\n\n## Step one",
+      tags: ["secret"],
+    });
+    const parentMemo = create(MemoSchema, { name: "memos/parent", content: "Secret parent", tags: ["secret"] });
 
-    expect(screen.getByRole("link", { name: "memo.back-to:common.map" })).toHaveAttribute("href", parentPage);
+    const { rerender } = renderSidebar(<MemoDetailSidebar memo={memo} parentMemo={parentMemo} contentHidden />);
+
+    expect(screen.queryByTestId("outline")).not.toBeInTheDocument();
+    expect(screen.queryByText("memo.on-this-memo")).not.toBeInTheDocument();
+    expect(screen.queryByText("Secret parent")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "memo.parent-memo" })).toHaveAttribute("href", "/memos/parent");
+
+    rerender(
+      <MemoryRouter initialEntries={["/memos/detail"]}>
+        <MemoDetailSidebar memo={memo} parentMemo={parentMemo} contentHidden={false} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("outline")).toHaveTextContent("2");
+  });
+
+  it("leaves returning to the origin to browser back and the app navigation", () => {
+    const parentPage = "/spaces/travel/map?filter=tagSearch%3Atravel&lat=35&lng=135&zoom=12&memo=memos%2Fdetail";
+    const { container } = renderSidebar(<MemoDetailSidebar memo={create(MemoSchema, { name: "memos/detail" })} parentPage={parentPage} />);
+
+    expect(container.querySelector(`a[href="${parentPage}"]`)).toBeNull();
   });
 
   it("organizes source, in-page navigation, connections, and frequent actions without repeating metadata", async () => {
@@ -73,8 +108,8 @@ describe("MemoDetailSidebar", () => {
       relations: [
         create(MemoRelationSchema, {
           type: MemoRelation_Type.REFERENCE,
-          memo: create(MemoRelation_MemoSchema, { name: "memos/detail" }),
-          relatedMemo: create(MemoRelation_MemoSchema, { name: "memos/outgoing", snippet: "Outgoing reference" }),
+          memo: create(MemoRelation_MemoRefSchema, { name: "memos/detail" }),
+          relatedMemo: create(MemoRelation_MemoRefSchema, { name: "memos/outgoing", snippet: "Outgoing reference" }),
         }),
         createIncomingReference("memos/detail"),
       ],
@@ -90,7 +125,6 @@ describe("MemoDetailSidebar", () => {
         memo={memo}
         parentMemo={parentMemo}
         parentPage="/explore?filter=tagSearch%3Awork"
-        hasExplicitOrigin
         commentCount={3}
         onEdit={onEdit}
         onCommentsOpen={onCommentsOpen}
@@ -99,7 +133,6 @@ describe("MemoDetailSidebar", () => {
       />,
     );
 
-    expect(screen.getByRole("link", { name: "memo.back-to:common.explore" })).toHaveAttribute("href", "/explore?filter=tagSearch%3Awork");
     expect(screen.getByText("memo.on-this-memo")).toBeInTheDocument();
     expect(screen.getByTestId("outline")).toHaveTextContent("2");
     expect(screen.getByRole("link", { name: /memo.comment.self/ })).toHaveTextContent("3");
@@ -155,8 +188,6 @@ describe("MemoDetailSidebar", () => {
     expect(screen.queryByRole("button", { name: "common.edit" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "memo.comment.write-a-comment" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "common.referenced-by: Incoming backlink" })).toBeInTheDocument();
-
-    expect(screen.getByRole("link", { name: "memo.go-to:common.explore" })).toHaveAttribute("href", "/explore");
   });
 
   it("keeps a simple memo useful without rendering empty navigation or connections", () => {
@@ -169,7 +200,6 @@ describe("MemoDetailSidebar", () => {
 
     renderSidebar(<MemoDetailSidebar memo={memo} parentPage="/" commentCount={0} onEdit={vi.fn()} onCommentCreate={vi.fn()} />);
 
-    expect(screen.getByRole("link", { name: "memo.go-to:common.home" })).toHaveAttribute("href", "/");
     expect(screen.queryByText("memo.on-this-memo")).not.toBeInTheDocument();
     expect(screen.queryByText("memo.connections")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "common.edit" })).toBeInTheDocument();
@@ -206,7 +236,6 @@ describe("MemoDetailSidebar", () => {
 
     renderSidebar(<MemoDetailSidebar memo={memo} parentPage="/archived" commentCount={2} onEdit={vi.fn()} onCommentCreate={vi.fn()} />);
 
-    expect(screen.getByRole("link", { name: "memo.go-to:common.archived" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /memo.comment.self/ })).toHaveTextContent("2");
     expect(screen.queryByRole("button", { name: "common.edit" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "memo.comment.write-a-comment" })).not.toBeInTheDocument();
@@ -230,7 +259,6 @@ describe("MemoDetailSidebar", () => {
         memo={memo}
         parentMemo={parentMemo}
         parentPage="/explore"
-        hasExplicitOrigin
         commentCount={4}
         forceReadonly
         onEdit={vi.fn()}
@@ -239,7 +267,6 @@ describe("MemoDetailSidebar", () => {
       "/memos/shares/share-token",
     );
 
-    expect(screen.queryByRole("link", { name: /memo.back-to/ })).not.toBeInTheDocument();
     expect(screen.getByText("memo.on-this-memo")).toBeInTheDocument();
     expect(screen.getByTestId("outline")).toHaveTextContent("2");
     expect(screen.queryByRole("link", { name: /memo.comment.self/ })).not.toBeInTheDocument();

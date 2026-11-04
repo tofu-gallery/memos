@@ -1,4 +1,6 @@
 import { createContext, type ReactNode, useContext, useState } from "react";
+import { useLocation } from "react-router-dom";
+import { ROUTES, resolveCollectionRoute } from "@/router/routes";
 
 export type MemoTimeBasis = "create_time" | "update_time";
 
@@ -11,7 +13,6 @@ interface ViewState {
   timeBasis?: MemoTimeBasis;
   sortTimeField?: MemoTimeBasis;
   compactMode: boolean;
-  linkPreview: boolean;
   maxColumns: MemoMaxColumns;
 }
 
@@ -19,12 +20,10 @@ interface ViewContextValue {
   orderByTimeAsc: boolean;
   timeBasis: MemoTimeBasis;
   compactMode: boolean;
-  linkPreview: boolean;
   maxColumns: MemoMaxColumns;
   setOrderByTimeAsc: (value: boolean) => void;
   setTimeBasis: (field: MemoTimeBasis) => void;
   setCompactMode: (value: boolean) => void;
-  setLinkPreview: (value: boolean) => void;
   setMaxColumns: (value: MemoMaxColumns) => void;
 }
 
@@ -32,9 +31,9 @@ const ViewContext = createContext<ViewContextValue | null>(null);
 
 const LOCAL_STORAGE_KEY = "memos-view-setting";
 
-const DEFAULT_VIEW_STATE: ViewState = { orderByTimeAsc: false, compactMode: false, linkPreview: true, maxColumns: 1 };
+const DEFAULT_VIEW_STATE: ViewState = { orderByTimeAsc: false, compactMode: false, maxColumns: 1 };
 
-export function ViewProvider({ children }: { children: ReactNode }) {
+export function ViewProvider({ children, enabled = true }: { children: ReactNode; enabled?: boolean }) {
   const getInitialState = (): ViewState => {
     try {
       const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -49,7 +48,6 @@ export function ViewProvider({ children }: { children: ReactNode }) {
           orderByTimeAsc: Boolean(data.orderByTimeAsc ?? DEFAULT_VIEW_STATE.orderByTimeAsc),
           timeBasis,
           compactMode: Boolean(data.compactMode ?? DEFAULT_VIEW_STATE.compactMode),
-          linkPreview: Boolean(data.linkPreview ?? DEFAULT_VIEW_STATE.linkPreview),
           maxColumns,
         };
       }
@@ -60,7 +58,9 @@ export function ViewProvider({ children }: { children: ReactNode }) {
   };
 
   const [viewState, setViewState] = useState(getInitialState);
-  const timeBasis = viewState.timeBasis ?? "create_time";
+  // Keep the saved Timeline preferences while other views use their default presentation.
+  const activeState = enabled ? viewState : DEFAULT_VIEW_STATE;
+  const timeBasis = activeState.timeBasis ?? "create_time";
 
   const persistToStorage = (newState: ViewState) => {
     try {
@@ -70,9 +70,9 @@ export function ViewProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const updateState = (patch: Partial<ViewState> | ((prev: ViewState) => Partial<ViewState>)) => {
+  const updateState = (patch: Partial<ViewState>) => {
     setViewState((prev) => {
-      const newState = { ...prev, ...(typeof patch === "function" ? patch(prev) : patch) };
+      const newState = { ...prev, ...patch };
       persistToStorage(newState);
       return newState;
     });
@@ -81,21 +81,18 @@ export function ViewProvider({ children }: { children: ReactNode }) {
   const setOrderByTimeAsc = (value: boolean) => updateState({ orderByTimeAsc: value });
   const setTimeBasis = (field: MemoTimeBasis) => updateState({ timeBasis: field });
   const setCompactMode = (value: boolean) => updateState({ compactMode: value });
-  const setLinkPreview = (value: boolean) => updateState({ linkPreview: value });
   const setMaxColumns = (value: MemoMaxColumns) => updateState({ maxColumns: value });
 
   return (
     <ViewContext.Provider
       value={{
-        orderByTimeAsc: viewState.orderByTimeAsc,
+        orderByTimeAsc: activeState.orderByTimeAsc,
         timeBasis,
-        compactMode: viewState.compactMode,
-        linkPreview: viewState.linkPreview,
-        maxColumns: viewState.maxColumns,
+        compactMode: activeState.compactMode,
+        maxColumns: activeState.maxColumns,
         setOrderByTimeAsc,
         setTimeBasis,
         setCompactMode,
-        setLinkPreview,
         setMaxColumns,
       }}
     >
@@ -104,17 +101,19 @@ export function ViewProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/** Timeline preferences also apply to its sidebar statistics and date filters. */
+export function TimelineViewProvider({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  const route = resolveCollectionRoute(pathname);
+  const collectionPath = route.pathname.toLowerCase();
+  const enabled = route.isCollection && (collectionPath === ROUTES.HOME || collectionPath === ROUTES.EXPLORE);
+  return <ViewProvider enabled={enabled}>{children}</ViewProvider>;
+}
+
 export function useView() {
   const context = useContext(ViewContext);
   if (!context) {
     throw new Error("useView must be used within ViewProvider");
   }
   return context;
-}
-
-// Read the link-preview preference from deep inside the markdown renderer, which
-// can render outside a ViewProvider (tests, isolated previews). Defaults to
-// enabled when no provider is present, preserving the historical behavior.
-export function useLinkPreviewEnabled() {
-  return useContext(ViewContext)?.linkPreview ?? DEFAULT_VIEW_STATE.linkPreview;
 }

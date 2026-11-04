@@ -1,6 +1,5 @@
 import copy from "copy-to-clipboard";
 import {
-  ArrowLeftIcon,
   ChevronDownIcon,
   CornerUpLeftIcon,
   Edit3Icon,
@@ -13,22 +12,23 @@ import {
 import { useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import { Link, useLocation } from "react-router-dom";
-import { getSidebarRouteKind } from "@/components/AppSidebar/routes";
 import SidebarRow, { SIDEBAR_ROW_CLASSES, SIDEBAR_ROW_COUNT_RAIL_CLASSES, SidebarRowIconSlot } from "@/components/AppSidebar/SidebarRow";
 import SidebarSection, { SIDEBAR_SECTION_STACK_CLASSES } from "@/components/AppSidebar/SidebarSection";
-import { extractHeadings } from "@/components/MemoContent/pipeline";
+import { extractHeadings } from "@/components/MemoEditor/view/headings";
 import { getRelationBuckets, getRelationMemo } from "@/components/MemoMetadata/Relation/relationHelpers";
 import { useResolvedRelationMemos } from "@/components/MemoMetadata/Relation/useResolvedRelationMemos";
 import MemoParentPlaceholder, { type MemoParentStatus } from "@/components/MemoParentPlaceholder";
 import { createMemoNavigationState } from "@/components/MemoView/navigation";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { useAuth } from "@/contexts/AuthContext";
 import { useInstance } from "@/contexts/InstanceContext";
 import { useOverflowTitle } from "@/hooks";
 import useCurrentUser from "@/hooks/useCurrentUser";
 import { MEMO_COMMENTS_ANCHOR_ID } from "@/lib/memo-comments";
+import { isMemoBlurred } from "@/lib/tag";
 import { cn } from "@/lib/utils";
-import { State } from "@/types/proto/api/v1/common_pb";
-import { Memo, type MemoRelation, Visibility } from "@/types/proto/api/v1/memo_service_pb";
+import { State } from "@/types/proto/api/common_pb";
+import { Memo, type MemoRelation, Visibility } from "@/types/proto/api/memo_service_pb";
 import { useTranslate } from "@/utils/i18n";
 import { canManageMemo } from "@/utils/user";
 import MemoOutline from "./MemoOutline";
@@ -40,7 +40,6 @@ interface Props {
   parentStatus?: MemoParentStatus;
   onParentRetry?: () => void;
   parentPage?: string;
-  hasExplicitOrigin?: boolean;
   commentCount?: number;
   className?: string;
   onEdit?: () => void;
@@ -48,6 +47,8 @@ interface Props {
   onCommentCreate?: () => void;
   onShareImageOpen?: () => void;
   forceReadonly?: boolean;
+  /** The memo body is tag-blurred and not yet revealed; its outline would leak the headings. */
+  contentHidden?: boolean;
 }
 
 const normalizeSnippet = (value: string): string => value.replace(/\s+/g, " ").trim();
@@ -92,7 +93,6 @@ const MemoDetailSidebar = ({
   parentStatus,
   onParentRetry,
   parentPage,
-  hasExplicitOrigin = false,
   commentCount,
   className,
   onEdit,
@@ -100,11 +100,13 @@ const MemoDetailSidebar = ({
   onCommentCreate,
   onShareImageOpen,
   forceReadonly = false,
+  contentHidden = false,
 }: Props) => {
   const t = useTranslate();
   const location = useLocation();
   const currentUser = useCurrentUser();
   const { profile } = useInstance();
+  const { userTagsSetting } = useAuth();
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
 
   const readonly = forceReadonly || !canManageMemo(memo, currentUser);
@@ -117,7 +119,7 @@ const MemoDetailSidebar = ({
     memo.state === State.NORMAL &&
     memo.visibility !== Visibility.SPACE;
 
-  const headings = useMemo(() => extractHeadings(memo.content), [memo.content]);
+  const headings = useMemo(() => (contentHidden ? [] : extractHeadings(memo.content)), [contentHidden, memo.content]);
   const { referenced } = useMemo(() => getRelationBuckets(memo.relations, memo.name), [memo.relations, memo.name]);
   const backlinkMemoNames = useMemo(
     () =>
@@ -139,31 +141,8 @@ const MemoDetailSidebar = ({
     return normalizeSnippet(relatedMemo.snippet || resolvedMemos[relatedMemo.name]?.snippet || relatedMemo.name);
   };
 
-  const originLabel = useMemo(() => {
-    const originPath = parentPage?.split(/[?#]/, 1)[0] || "/";
-    switch (getSidebarRouteKind(originPath)) {
-      case "map":
-        return t("common.map");
-      case "explore":
-        return t("common.explore");
-      case "archived":
-        return t("common.archived");
-      case "attachments":
-        return t("common.attachments");
-      case "profile":
-        return t("common.profile");
-      case "views":
-        return t("common.views");
-      case "inbox":
-        return t("common.inbox");
-      case "settings":
-        return t("common.settings");
-      default:
-        return t("common.home");
-    }
-  }, [parentPage, t]);
-
-  const parentSnippet = parentMemo ? normalizeSnippet(parentMemo.snippet || parentMemo.content || parentMemo.name) : "";
+  const parentBlurred = !!parentMemo && isMemoBlurred(parentMemo, userTagsSetting);
+  const parentSnippet = parentMemo && !parentBlurred ? normalizeSnippet(parentMemo.snippet || parentMemo.content || parentMemo.name) : "";
   const showComments = !forceReadonly && commentCount !== undefined && commentCount > 0;
   const showOnThisMemo = headings.length > 1 || showComments;
   const showConnections = !forceReadonly && (!!parentMemo || !!parentStatus || referenced.length > 0);
@@ -177,23 +156,6 @@ const MemoDetailSidebar = ({
 
   return (
     <div className={cn("relative w-full select-none", SIDEBAR_SECTION_STACK_CLASSES, className)}>
-      {!forceReadonly && parentPage && (
-        <SidebarSection
-          ariaLabel={hasExplicitOrigin ? t("memo.back-to", { source: originLabel }) : t("memo.go-to", { source: originLabel })}
-        >
-          <Link
-            className={cn(SIDEBAR_ROW_CLASSES, "text-muted-foreground hover:bg-sidebar-accent/65 hover:text-foreground")}
-            to={parentPage}
-            viewTransition
-          >
-            <SidebarRowIconSlot icon={ArrowLeftIcon} />
-            <span className="min-w-0 flex-1 truncate text-start">
-              {hasExplicitOrigin ? t("memo.back-to", { source: originLabel }) : t("memo.go-to", { source: originLabel })}
-            </span>
-          </Link>
-        </SidebarSection>
-      )}
-
       {showOnThisMemo && (
         <SidebarSection label={t("memo.on-this-memo")}>
           {headings.length > 1 && <MemoOutline headings={headings} memoName={memo.name} />}
@@ -220,15 +182,15 @@ const MemoDetailSidebar = ({
           {parentStatus && <MemoParentPlaceholder status={parentStatus} onRetry={onParentRetry} />}
           {!parentStatus && parentMemo && (
             <Link
-              aria-label={`${t("memo.parent-memo")}: ${parentSnippet}`}
+              aria-label={parentSnippet ? `${t("memo.parent-memo")}: ${parentSnippet}` : t("memo.parent-memo")}
               className={cn(SIDEBAR_ROW_CLASSES, "text-muted-foreground hover:bg-sidebar-accent/65 hover:text-foreground")}
               to={`/${parentMemo.name}`}
               state={parentPage ? createMemoNavigationState(parentPage) : undefined}
-              title={parentSnippet}
+              title={parentSnippet || undefined}
               viewTransition
             >
               <SidebarRowIconSlot icon={CornerUpLeftIcon} />
-              <span className="min-w-0 flex-1 truncate text-start">{parentSnippet}</span>
+              <span className="min-w-0 flex-1 truncate text-start">{parentSnippet || t("memo.parent-memo")}</span>
             </Link>
           )}
           {referenced.map((relation) => {

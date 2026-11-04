@@ -1,5 +1,5 @@
 import { forwardRef, useMemo } from "react";
-import MemoContent from "@/components/MemoContent";
+import { MemoContentView } from "@/components/MemoEditor/view/MemoContentView";
 import UserAvatar from "@/components/UserAvatar";
 import i18n from "@/i18n";
 import { cn } from "@/lib/utils";
@@ -29,7 +29,7 @@ const MemoShareImagePreview = forwardRef<HTMLDivElement, { width: number }>(({ w
       <div className="overflow-hidden rounded-lg border border-border/60 bg-background p-4 sm:p-5">
         <div className="flex items-start gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
-            <UserAvatar avatarUrl={preview.avatarUrl} className="h-8 w-8 rounded-xl" />
+            <UserAvatar avatarUrl={preview.avatarUrl} name={preview.displayName} className="h-8 w-8" />
             <div className="min-w-0">
               <div className="truncate text-[13px] font-semibold text-foreground">{preview.displayName}</div>
               {preview.formattedDisplayTime && <div className="truncate text-xs text-muted-foreground">{preview.formattedDisplayTime}</div>}
@@ -39,7 +39,7 @@ const MemoShareImagePreview = forwardRef<HTMLDivElement, { width: number }>(({ w
 
         <div className="mt-4">
           <div className={cn("pointer-events-none", blurred && !showBlurredContent && "blur-lg")}>
-            <MemoContent
+            <MemoContentView
               content={memo.content}
               attachments={memo.attachments}
               compact={false}

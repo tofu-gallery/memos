@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { useInstance } from "@/contexts/InstanceContext";
+import { isFieldManaged, useManagedResource } from "@/hooks/useConfigurationQueries";
 import { cn } from "@/lib/utils";
 import {
   InstanceSetting_Key,
@@ -22,8 +23,9 @@ import {
   InstanceSetting_StorageSettingSchema,
   InstanceSetting_StorageType,
   InstanceSettingSchema,
-} from "@/types/proto/api/v1/instance_service_pb";
+} from "@/types/proto/api/instance_service_pb";
 import { useTranslate } from "@/utils/i18n";
+import ManagedByConfigurationChip from "./ManagedByConfigurationChip";
 import SettingGroup from "./SettingGroup";
 import { SettingPanel } from "./SettingList";
 import SettingRow from "./SettingRow";
@@ -151,6 +153,10 @@ const canonicalizeStorageSetting = (
 
 const StorageSection = () => {
   const t = useTranslate();
+  const managed = useManagedResource(buildInstanceSettingName(InstanceSetting_Key.STORAGE));
+  // The registry, its default, and the S3 fields are edited together, so they lock together.
+  const registryLocked = isFieldManaged(managed, "storageSetting.storages") || isFieldManaged(managed, "storageSetting.defaultStorageId");
+  const templateLocked = isFieldManaged(managed, "storageSetting.filepathTemplate");
   const saveInstanceSetting = useInstanceSettingUpdater();
   const { storageSetting: originalSetting } = useInstance();
   const [instanceStorageSetting, setInstanceStorageSetting] = useState<InstanceSetting_StorageSetting>(originalSetting);
@@ -170,10 +176,6 @@ const StorageSection = () => {
   }, [originalSetting]);
 
   const allowSaveStorageSetting = useMemo(() => {
-    if (instanceStorageSetting.uploadSizeLimitMb <= 0) {
-      return false;
-    }
-
     if (selectedStorageType === InstanceSetting_StorageType.LOCAL) {
       if (instanceStorageSetting.filepathTemplate.length === 0) {
         return false;
@@ -192,19 +194,6 @@ const StorageSection = () => {
     }
     return !isEqual(originalSetting, canonicalizeStorageSetting(instanceStorageSetting, originalSetting));
   }, [canReuseSelectedS3Secret, instanceStorageSetting, originalSetting, selectedS3Config, selectedStorageType]);
-
-  const handleMaxUploadSizeChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    let num = parseInt(event.target.value);
-    if (Number.isNaN(num)) {
-      num = 0;
-    }
-    setInstanceStorageSetting((current) =>
-      create(InstanceSetting_StorageSettingSchema, {
-        ...current,
-        uploadSizeLimitMb: BigInt(num),
-      }),
-    );
-  };
 
   const handleFilepathTemplateChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
     setInstanceStorageSetting((current) =>
@@ -285,8 +274,13 @@ const StorageSection = () => {
 
   return (
     <SettingSection title={t("setting.storage.label")}>
-      <SettingGroup title={t("setting.storage.current-storage")} description={t("setting.storage.current-storage-description")}>
+      <SettingGroup
+        title={t("setting.storage.current-storage")}
+        description={t("setting.storage.current-storage-description")}
+        actions={registryLocked || templateLocked ? <ManagedByConfigurationChip resource={managed} /> : undefined}
+      >
         <RadioGroup
+          disabled={registryLocked}
           value={String(selectedStorageType)}
           onValueChange={(value) => {
             handleStorageTypeChanged(Number(value) as InstanceSetting_StorageType);
@@ -357,14 +351,6 @@ const StorageSection = () => {
           </ul>
         </SettingPanel>
 
-        <SettingRow label={t("setting.system.max-upload-size")} tooltip={t("setting.system.max-upload-size-hint")}>
-          <Input
-            className="w-24 font-mono"
-            value={String(instanceStorageSetting.uploadSizeLimitMb)}
-            onChange={handleMaxUploadSizeChanged}
-          />
-        </SettingRow>
-
         {selectedStorageType !== InstanceSetting_StorageType.DATABASE && (
           <SettingRow
             label={t("setting.storage.filepath-template")}
@@ -374,6 +360,7 @@ const StorageSection = () => {
             <Input
               className="w-full max-w-lg font-mono"
               value={instanceStorageSetting.filepathTemplate}
+              disabled={templateLocked}
               placeholder={DEFAULT_FILEPATH_TEMPLATE}
               onChange={handleFilepathTemplateChanged}
             />
@@ -391,6 +378,7 @@ const StorageSection = () => {
             <Input
               className="w-64"
               value={selectedS3Config?.accessKeyId ?? ""}
+              disabled={registryLocked}
               onChange={(e) => handleS3FieldChange("accessKeyId", e.target.value)}
             />
           </SettingRow>
@@ -405,6 +393,7 @@ const StorageSection = () => {
               className="w-64"
               type="password"
               value={selectedS3Config?.accessKeySecret ?? ""}
+              disabled={registryLocked}
               onChange={(e) => handleS3FieldChange("accessKeySecret", e.target.value)}
             />
           </SettingRow>
@@ -413,6 +402,7 @@ const StorageSection = () => {
             <Input
               className="w-64"
               value={selectedS3Config?.endpoint ?? ""}
+              disabled={registryLocked}
               onChange={(e) => handleS3FieldChange("endpoint", e.target.value)}
             />
           </SettingRow>
@@ -421,6 +411,7 @@ const StorageSection = () => {
             <Input
               className="w-64"
               value={selectedS3Config?.region ?? ""}
+              disabled={registryLocked}
               onChange={(e) => handleS3FieldChange("region", e.target.value)}
             />
           </SettingRow>
@@ -429,6 +420,7 @@ const StorageSection = () => {
             <Input
               className="w-64"
               value={selectedS3Config?.bucket ?? ""}
+              disabled={registryLocked}
               onChange={(e) => handleS3FieldChange("bucket", e.target.value)}
             />
           </SettingRow>
@@ -436,6 +428,7 @@ const StorageSection = () => {
           <SettingRow label={t("setting.storage.use-path-style")} description={t("setting.storage.use-path-style-description")}>
             <Switch
               checked={selectedS3Config?.usePathStyle ?? false}
+              disabled={registryLocked}
               onCheckedChange={(checked) => handleS3FieldChange("usePathStyle", checked)}
             />
           </SettingRow>
@@ -446,6 +439,7 @@ const StorageSection = () => {
           >
             <Switch
               checked={selectedS3Config?.insecureSkipTlsVerify ?? false}
+              disabled={registryLocked}
               onCheckedChange={(checked) => handleS3FieldChange("insecureSkipTlsVerify", checked)}
             />
           </SettingRow>
@@ -453,7 +447,7 @@ const StorageSection = () => {
       )}
 
       <div className="w-full flex justify-end">
-        <Button disabled={!allowSaveStorageSetting} onClick={saveInstanceStorageSetting}>
+        <Button disabled={(registryLocked && templateLocked) || !allowSaveStorageSetting} onClick={saveInstanceStorageSetting}>
           {t("common.save")}
         </Button>
       </div>

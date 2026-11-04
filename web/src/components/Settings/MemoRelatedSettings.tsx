@@ -6,49 +6,32 @@ import { toast } from "react-hot-toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { useInstance } from "@/contexts/InstanceContext";
+import { isFieldManaged, useManagedResource } from "@/hooks/useConfigurationQueries";
 import {
   InstanceSetting_Key,
   InstanceSetting_MemoRelatedSetting,
   InstanceSetting_MemoRelatedSettingSchema,
   InstanceSettingSchema,
-} from "@/types/proto/api/v1/instance_service_pb";
+} from "@/types/proto/api/instance_service_pb";
 import { useTranslate } from "@/utils/i18n";
+import ManagedByConfigurationChip from "./ManagedByConfigurationChip";
 import SettingGroup from "./SettingGroup";
-import { SettingList, SettingListItem, SettingPanel } from "./SettingList";
+import { SettingPanel } from "./SettingList";
 import SettingSection from "./SettingSection";
 import useInstanceSettingUpdater, { buildInstanceSettingName } from "./useInstanceSettingUpdater";
-
-const MIN_CONTENT_LENGTH_LIMIT = 8 * 1024;
-const MAX_CONTENT_LENGTH_LIMIT = 2_147_483_647;
-
-const parseContentLengthLimit = (value: string): number | undefined => {
-  if (value.trim() === "") {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
-    return undefined;
-  }
-  if (parsed < MIN_CONTENT_LENGTH_LIMIT || parsed > MAX_CONTENT_LENGTH_LIMIT) {
-    return undefined;
-  }
-  return parsed;
-};
 
 const MemoRelatedSettings = () => {
   const t = useTranslate();
   const saveInstanceSetting = useInstanceSettingUpdater();
   const { memoRelatedSetting: originalSetting } = useInstance();
   const [memoRelatedSetting, setMemoRelatedSetting] = useState<InstanceSetting_MemoRelatedSetting>(originalSetting);
-  const [contentLengthLimitInput, setContentLengthLimitInput] = useState(String(originalSetting.contentLengthLimit));
   const [editingReaction, setEditingReaction] = useState<string>("");
+  const managed = useManagedResource(buildInstanceSettingName(InstanceSetting_Key.MEMO_RELATED));
+  const reactionsLocked = isFieldManaged(managed, "memoRelatedSetting.reactions");
 
   useEffect(() => {
     setMemoRelatedSetting(originalSetting);
-    setContentLengthLimitInput(String(originalSetting.contentLengthLimit));
   }, [originalSetting]);
 
   const updatePartialSetting = (partial: Partial<InstanceSetting_MemoRelatedSetting>) => {
@@ -70,26 +53,10 @@ const MemoRelatedSettings = () => {
   };
 
   const handleUpdateSetting = async () => {
-    const contentLengthLimit = parseContentLengthLimit(contentLengthLimitInput);
-    if (contentLengthLimit === undefined) {
-      toast.error(
-        t("setting.memo.content-length-limit-error", {
-          min: MIN_CONTENT_LENGTH_LIMIT,
-          max: MAX_CONTENT_LENGTH_LIMIT,
-        }),
-      );
-      return;
-    }
-
     if (memoRelatedSetting.reactions.length === 0) {
       toast.error(t("setting.memo.reactions-required"));
       return;
     }
-
-    const updatedMemoRelatedSetting = create(InstanceSetting_MemoRelatedSettingSchema, {
-      ...memoRelatedSetting,
-      contentLengthLimit,
-    });
 
     await saveInstanceSetting({
       key: InstanceSetting_Key.MEMO_RELATED,
@@ -97,7 +64,7 @@ const MemoRelatedSettings = () => {
         name: buildInstanceSettingName(InstanceSetting_Key.MEMO_RELATED),
         value: {
           case: "memoRelatedSetting",
-          value: updatedMemoRelatedSetting,
+          value: memoRelatedSetting,
         },
       }),
       errorContext: "Update memo-related settings",
@@ -106,40 +73,11 @@ const MemoRelatedSettings = () => {
 
   return (
     <SettingSection title={t("setting.memo.label")}>
-      <SettingGroup title={t("setting.memo.editing-title")} description={t("setting.memo.editing-description")}>
-        <SettingList>
-          <SettingListItem
-            label={t("setting.system.enable-double-click-to-edit")}
-            description={t("setting.memo.double-click-edit-description")}
-          >
-            <Switch
-              checked={memoRelatedSetting.enableDoubleClickEdit}
-              onCheckedChange={(checked) => updatePartialSetting({ enableDoubleClickEdit: checked })}
-            />
-          </SettingListItem>
-
-          <SettingListItem label={t("setting.memo.content-length-limit")} description={t("setting.memo.content-length-limit-description")}>
-            <div className="flex items-center gap-2">
-              <Input
-                className="w-28 font-mono"
-                type="number"
-                min={MIN_CONTENT_LENGTH_LIMIT}
-                max={MAX_CONTENT_LENGTH_LIMIT}
-                step={1}
-                required
-                aria-label={t("setting.memo.content-length-limit")}
-                value={contentLengthLimitInput}
-                onChange={(event) => setContentLengthLimitInput(event.target.value)}
-              />
-              <span className="text-xs text-muted-foreground">
-                {t("setting.memo.content-length-limit-minimum", { min: MIN_CONTENT_LENGTH_LIMIT })}
-              </span>
-            </div>
-          </SettingListItem>
-        </SettingList>
-      </SettingGroup>
-
-      <SettingGroup title={t("setting.memo.reactions")} description={t("setting.memo.reactions-description")} showSeparator>
+      <SettingGroup
+        title={t("setting.memo.reactions")}
+        description={t("setting.memo.reactions-description")}
+        actions={reactionsLocked ? <ManagedByConfigurationChip resource={managed} /> : undefined}
+      >
         <SettingPanel
           header={
             <div className="flex items-center justify-between gap-3">
@@ -155,10 +93,11 @@ const MemoRelatedSettings = () => {
                 className="h-8 max-w-48 font-mono"
                 placeholder={t("setting.memo.reaction-placeholder")}
                 value={editingReaction}
+                disabled={reactionsLocked}
                 onChange={(event) => setEditingReaction(event.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && upsertReaction()}
               />
-              <Button variant="outline" size="sm" onClick={upsertReaction} disabled={!editingReaction.trim()}>
+              <Button variant="outline" size="sm" onClick={upsertReaction} disabled={reactionsLocked || !editingReaction.trim()}>
                 <CheckIcon className="w-4 h-4 mr-1.5" />
                 {t("setting.memo.add-reaction")}
               </Button>
@@ -172,6 +111,7 @@ const MemoRelatedSettings = () => {
                 <Button
                   variant="ghost"
                   size="icon-sm"
+                  disabled={reactionsLocked}
                   onClick={() => updatePartialSetting({ reactions: memoRelatedSetting.reactions.filter((r) => r !== reactionType) })}
                   aria-label={t("setting.memo.remove-reaction")}
                 >
@@ -184,10 +124,7 @@ const MemoRelatedSettings = () => {
       </SettingGroup>
 
       <div className="w-full flex justify-end">
-        <Button
-          disabled={isEqual(memoRelatedSetting, originalSetting) && contentLengthLimitInput === String(originalSetting.contentLengthLimit)}
-          onClick={handleUpdateSetting}
-        >
+        <Button disabled={isEqual(memoRelatedSetting, originalSetting)} onClick={handleUpdateSetting}>
           {t("common.save")}
         </Button>
       </div>

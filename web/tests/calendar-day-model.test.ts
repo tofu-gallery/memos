@@ -1,9 +1,9 @@
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { describe, expect, it } from "vitest";
-import { buildCalendarMonthModel } from "@/components/CalendarView/dayModel";
-import { AttachmentSchema } from "@/types/proto/api/v1/attachment_service_pb";
-import { type Memo, MemoSchema } from "@/types/proto/api/v1/memo_service_pb";
+import { buildCalendarMonthModel, getMemoThumbnail } from "@/components/CalendarView/dayModel";
+import { AttachmentSchema } from "@/types/proto/api/attachment_service_pb";
+import { type Memo, MemoSchema } from "@/types/proto/api/memo_service_pb";
 
 const memoAt = (hour: number, overrides: MessageInitShape<typeof MemoSchema> = {}): Memo =>
   create(MemoSchema, {
@@ -49,6 +49,12 @@ describe("calendar day snapshots", () => {
       isCode: true,
     });
     expect(day([memoAt(9, { content: "- [x] Ship release\n- [ ] Write notes" })]).excerpt?.text).toBe("Ship release\nWrite notes");
+  });
+
+  it("reads a callout without its type marker, as the memo shows it", () => {
+    expect(day([memoAt(9, { content: "> [!WARNING]\n> Back up first." })]).excerpt?.text).toBe("Back up first.");
+    expect(day([memoAt(9, { content: "> [!NOTE] inline\n> text" })]).excerpt?.text).toBe("[!NOTE] inline\ntext");
+    expect(day([memoAt(9, { content: "> `[!NOTE]`\n> text" })]).excerpt?.text).toBe("[!NOTE]\ntext");
   });
 
   it("skips empty and image-only memos when choosing text and keeps photos from distinct memos", () => {
@@ -119,6 +125,7 @@ describe("calendar day snapshots", () => {
           "`![code](https://example.com/code.jpg)`",
           "```md\n![fenced](https://example.com/fenced.jpg)\n```",
           '<img src="https://example.com/html.jpg">',
+          'Inline <img src="https://example.com/inline-html.jpg"> text',
           "![missing][undefined]",
           "![data](data:image/png;base64,AAAA)",
           "![insecure](http://example.com/insecure.jpg)",
@@ -131,6 +138,29 @@ describe("calendar day snapshots", () => {
     expect(result.images.map((entry) => entry.thumbnailUrl)).toEqual(["https://example.com/valid.jpg"]);
   });
 
+  it("reads images in footnotes in reading order, references and source policy included", () => {
+    const result = day([
+      memoAt(9, {
+        content: [
+          "See the note[^1].",
+          "[^1]: Taken at dawn ![dawn][photo]\n    ![insecure](http://example.com/insecure.jpg)",
+          "![after](https://example.com/after.jpg)",
+          "[photo]: https://example.com/dawn.jpg",
+        ].join("\n\n"),
+      }),
+    ]);
+    expect(result.images.map((entry) => entry.thumbnailUrl)).toEqual(["https://example.com/dawn.jpg"]);
+    expect(getMemoThumbnail(memoAt(9, { content: "Note[^a]\n\n[^a]: ![only](https://example.com/only.jpg)" }))).toBe(
+      "https://example.com/only.jpg",
+    );
+  });
+
+  it("reads a footnote's text, not its reference label, into the excerpt", () => {
+    expect(day([memoAt(9, { content: "Test[^1]\n\n[^1]: very **important**\n\n    second paragraph" })]).excerpt?.text).toBe(
+      "Test\nvery important\nsecond paragraph",
+    );
+  });
+
   it("does not turn an image-only memo's alt text into an excerpt", () => {
     const result = day([memoAt(9, { content: "![caption](https://example.com/a.jpg)", snippet: "caption" })]);
     expect(result.excerpt).toBeUndefined();
@@ -140,6 +170,32 @@ describe("calendar day snapshots", () => {
   it("uses a filename only when the day has no readable text", () => {
     expect(day([memoAt(9, { attachments: [pdf] })]).excerpt?.text).toBe("doc.pdf");
     expect(day([memoAt(9, { attachments: [pdf] }), memoAt(10, { content: "Notes" })]).excerpt?.text).toBe("Notes");
+  });
+
+  it("attributes the excerpt to the memo it came from, filename fallback included", () => {
+    const text = day([
+      memoAt(9, { creator: "users/bob", content: "Morning run" }),
+      memoAt(10, { creator: "users/alice", content: "Lunch" }),
+    ]);
+    expect(text.excerpt).toMatchObject({ memoName: "memos/9", creator: "users/bob", text: "Morning run" });
+    expect(day([memoAt(9, { creator: "users/carol", attachments: [pdf] })]).excerpt).toMatchObject({
+      creator: "users/carol",
+      text: "doc.pdf",
+    });
+  });
+
+  it("names each creator once, in the order they first wrote, hidden memos included", () => {
+    const summary = buildCalendarMonthModel(
+      [
+        memoAt(11, { creator: "users/bob" }),
+        memoAt(9, { creator: "users/carol", tags: ["private"] }),
+        memoAt(10, { creator: "users/bob" }),
+        memoAt(12, { creator: "users/alice" }),
+      ],
+      "create_time",
+      { isRedacted: (memo) => memo.tags.includes("private") },
+    )["2026-08-02"];
+    expect(summary.creators).toEqual(["users/carol", "users/bob", "users/alice"]);
   });
 
   it("counts hidden memos without exposing text, filenames, or photos", () => {
@@ -158,5 +214,16 @@ describe("calendar day snapshots", () => {
 
   it("uses update time when selected and ignores undated memos", () => {
     expect(Object.keys(buildCalendarMonthModel([memoAt(9), create(MemoSchema)], "update_time"))).toEqual(["2026-08-03"]);
+  });
+
+  it("finds a single memo's first photo in the same order, for map pins", () => {
+    expect(getMemoThumbnail(memoAt(9, { content: "just words" }))).toBeUndefined();
+    expect(getMemoThumbnail(memoAt(9, { attachments: [pdf] }))).toBeUndefined();
+    expect(getMemoThumbnail(memoAt(9, { content: "![a](https://example.com/inline.jpg)", attachments: [image("later")] }))).toBe(
+      "https://example.com/inline.jpg",
+    );
+    expect(getMemoThumbnail(memoAt(9, { attachments: [image("only")] }))).toBe(
+      day([memoAt(9, { attachments: [image("only")] })]).images[0].thumbnailUrl,
+    );
   });
 });

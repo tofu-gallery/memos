@@ -17,26 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v4.2.0
-        with:
-          version: 11.0.1
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: pnpm
-          cache-dependency-path: "web/pnpm-lock.yaml"
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        shell: bash
-        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
-      - name: Setup pnpm cache
-        uses: actions/cache@v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('web/pnpm-lock.yaml') }}
-          restore-keys: ${{ runner.os }}-pnpm-store-
-      - run: pnpm install --frozen-lockfile
-        working-directory: web
+      - name: Setup web
+        uses: ./.github/actions/setup-web
+
       - name: Run frontend build
         run: pnpm release
         working-directory: web
@@ -62,14 +45,12 @@ jobs:
           - linux/arm64
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
-      - name: Resolve version from latest tag
+      - name: Resolve version from commit date
         id: version
         run: |
-          version="$(git describe --tags --abbrev=0 2>/dev/null || echo dev)"
-          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+          version="$(bash scripts/release_version.sh development-version)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Download frontend artifacts
         uses: actions/download-artifact@v7

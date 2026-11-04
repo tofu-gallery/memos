@@ -5,13 +5,15 @@ import { getIdentityProviderTypeLabel, getSSOProviderUid } from "@/components/Se
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { identityProviderServiceClient, userServiceClient } from "@/connect";
+import { findManagedResource, useConfigurationStatus } from "@/hooks/useConfigurationQueries";
 import useCurrentUser from "@/hooks/useCurrentUser";
 import { absolutifyLink } from "@/lib/browser";
 import { handleError } from "@/lib/error";
-import { IdentityProvider, IdentityProvider_Type } from "@/types/proto/api/v1/idp_service_pb";
-import { LinkedIdentity } from "@/types/proto/api/v1/user_service_pb";
+import { IdentityProvider, IdentityProvider_Type } from "@/types/proto/api/idp_service_pb";
+import { LinkedIdentity } from "@/types/proto/api/user_service_pb";
 import { useTranslate } from "@/utils/i18n";
 import { storeOAuthState } from "@/utils/oauth";
+import ManagedByConfigurationChip from "./ManagedByConfigurationChip";
 import SettingGroup from "./SettingGroup";
 import SettingTable from "./SettingTable";
 
@@ -20,7 +22,7 @@ interface LinkedIdentityRow extends Record<string, unknown> {
   providerUid: string;
   title: string;
   typeLabel: string;
-  externUid: string;
+  externalUid: string;
   isLinked: boolean;
   linkedIdentity?: LinkedIdentity;
   identityProvider: IdentityProvider;
@@ -29,6 +31,7 @@ interface LinkedIdentityRow extends Record<string, unknown> {
 const LinkedIdentitySection = () => {
   const t = useTranslate();
   const currentUser = useCurrentUser();
+  const configurationStatus = useConfigurationStatus();
   const [identityProviderList, setIdentityProviderList] = useState<IdentityProvider[]>([]);
   const [linkedIdentityList, setLinkedIdentityList] = useState<LinkedIdentity[]>([]);
 
@@ -63,8 +66,8 @@ const LinkedIdentitySection = () => {
   const linkedIdentityByProviderName = useMemo(() => {
     const mapping = new Map<string, LinkedIdentity>();
     for (const linkedIdentity of linkedIdentityList) {
-      if (!mapping.has(linkedIdentity.idpName)) {
-        mapping.set(linkedIdentity.idpName, linkedIdentity);
+      if (!mapping.has(linkedIdentity.identityProvider)) {
+        mapping.set(linkedIdentity.identityProvider, linkedIdentity);
       }
     }
     return mapping;
@@ -79,7 +82,7 @@ const LinkedIdentitySection = () => {
           providerUid: getSSOProviderUid(identityProvider.name),
           title: identityProvider.title,
           typeLabel: getIdentityProviderTypeLabel(identityProvider.type),
-          externUid: linkedIdentity?.externUid ?? "",
+          externalUid: linkedIdentity?.externalUid ?? "",
           isLinked: !!linkedIdentity,
           linkedIdentity,
           identityProvider,
@@ -152,7 +155,7 @@ const LinkedIdentitySection = () => {
               <div className="flex min-w-[16rem] flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm font-medium text-foreground">{row.title}</span>
-                  <Badge variant="secondary" className="rounded-full px-2.5 py-0.5">
+                  <Badge variant="neutral" shape="pill">
                     {row.typeLabel}
                   </Badge>
                 </div>
@@ -163,17 +166,18 @@ const LinkedIdentitySection = () => {
             ),
           },
           {
-            key: "externUid",
+            key: "externalUid",
             header: t("setting.sso.account"),
             render: (_, row: LinkedIdentityRow) => (
               <div className="flex min-w-[22rem] flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={row.isLinked ? "default" : "outline"} className="rounded-full px-2.5 py-0.5">
+                  <Badge variant={row.isLinked ? "neutral" : "outline"} shape="pill">
                     {row.isLinked ? t("setting.sso.linked") : t("setting.sso.not-linked")}
                   </Badge>
-                  {row.isLinked && row.externUid ? (
-                    <InfoChip label={t("setting.sso.extern-uid")} value={row.externUid} tooltip={row.externUid} />
+                  {row.isLinked && row.externalUid ? (
+                    <InfoChip label={t("setting.sso.extern-uid")} value={row.externalUid} tooltip={row.externalUid} />
                   ) : null}
+                  <ManagedByConfigurationChip resource={findManagedResource(configurationStatus, row.linkedIdentity?.name ?? "")} />
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {row.isLinked ? t("setting.sso.extern-uid-description") : t("setting.sso.not-linked-description")}
@@ -187,9 +191,12 @@ const LinkedIdentitySection = () => {
             className: "w-px text-right",
             render: (_, row: LinkedIdentityRow) =>
               row.linkedIdentity ? (
-                <Button variant="outline" size="sm" onClick={() => handleUnlinkIdentityProvider(row)}>
-                  {t("common.unlink")}
-                </Button>
+                // A link the configuration declares is unlinked in its file, not here.
+                findManagedResource(configurationStatus, row.linkedIdentity.name) ? null : (
+                  <Button variant="outline" size="sm" onClick={() => handleUnlinkIdentityProvider(row)}>
+                    {t("common.unlink")}
+                  </Button>
+                )
               ) : (
                 <Button variant="outline" size="sm" onClick={() => handleLinkIdentityProvider(row.identityProvider)}>
                   {t("common.link")}

@@ -2,9 +2,11 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { useEffect } from "react";
 import { Outlet, ScrollRestoration } from "react-router-dom";
 import { useInstance } from "./contexts/InstanceContext";
+import { TimelineViewProvider } from "./contexts/ViewContext";
 import useNavigateTo from "./hooks/useNavigateTo";
 import { useUserLocale } from "./hooks/useUserLocale";
 import { useUserTheme } from "./hooks/useUserTheme";
+import { DEFAULT_FAVICON, getCustomLogoUrl } from "./lib/branding";
 import { cleanupExpiredOAuthState } from "./utils/oauth";
 
 const App = () => {
@@ -49,18 +51,29 @@ const App = () => {
 
   // Dynamic update metadata with customized profile
   useEffect(() => {
-    if (!instanceGeneralSetting.customProfile) {
+    const customProfile = instanceGeneralSetting.customProfile;
+    document.title = customProfile?.title || "Memos";
+    const link = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
+    if (!link) return;
+
+    const logoUrl = getCustomLogoUrl(customProfile?.logoUrl);
+    if (logoUrl) {
+      link.href = logoUrl;
+      // Custom images may be PNG, JPEG, or SVG; let the browser detect their type.
+      link.removeAttribute("type");
       return;
     }
 
-    document.title = instanceGeneralSetting.customProfile.title;
-    const link = document.querySelector("link[rel~='icon']") as HTMLLinkElement;
-    link.href = instanceGeneralSetting.customProfile.logoUrl || "/logo.webp";
+    // A fixed blue stays visible when browser chrome differs from the system theme.
+    link.href = DEFAULT_FAVICON;
+    link.type = "image/svg+xml";
   }, [instanceGeneralSetting.customProfile]);
 
   return (
     <DirectionProvider direction={direction}>
-      <Outlet />
+      <TimelineViewProvider>
+        <Outlet />
+      </TimelineViewProvider>
       <ScrollRestoration />
     </DirectionProvider>
   );

@@ -138,6 +138,7 @@ func (d *DB) ListAttachments(ctx context.Context, find *store.FindAttachment) ([
 		"attachment.reference AS reference",
 		"attachment.payload AS payload",
 		"CASE WHEN memo.uid IS NOT NULL THEN memo.uid ELSE NULL END AS memo_uid",
+		"attachment_creator.username AS creator_username",
 	}
 	if find.GetBlob {
 		fields = append(fields, "attachment.blob AS blob")
@@ -148,6 +149,7 @@ func (d *DB) ListAttachments(ctx context.Context, find *store.FindAttachment) ([
 			%s
 		FROM attachment
 		LEFT JOIN memo ON attachment.memo_id = memo.id
+		LEFT JOIN "user" AS attachment_creator ON attachment.creator_id = attachment_creator.id
 		LEFT JOIN space AS attachment_space ON memo.space_id = attachment_space.id
 		WHERE %s
 		ORDER BY attachment.updated_ts DESC
@@ -185,6 +187,7 @@ func (d *DB) ListAttachments(ctx context.Context, find *store.FindAttachment) ([
 			&attachment.Reference,
 			&payloadBytes,
 			&attachment.MemoUID,
+			&attachment.CreatorUsername,
 		}
 		if find.GetBlob {
 			dests = append(dests, &attachment.Blob)
@@ -323,7 +326,7 @@ func (d *DB) DeleteAttachments(ctx context.Context, deletes []*store.DeleteAttac
 // GetAttachmentStorageUsage returns the total persisted attachment size for a creator in bytes.
 func (d *DB) GetAttachmentStorageUsage(ctx context.Context, creatorID int32) (int64, error) {
 	var size int64
-	if err := d.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(size), 0) FROM attachment WHERE creator_id = $1", creatorID).Scan(&size); err != nil {
+	if err := d.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(size), 0) FROM attachment WHERE creator_id = $1 AND storage_type <> 'EXTERNAL'", creatorID).Scan(&size); err != nil {
 		return 0, errors.Wrap(err, "failed to sum attachment sizes")
 	}
 	return size, nil

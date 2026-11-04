@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import PagedMemoList from "@/components/PagedMemoList";
-import type { Memo } from "@/types/proto/api/v1/memo_service_pb";
+import type { Memo } from "@/types/proto/api/memo_service_pb";
 
 const view = vi.hoisted(() => ({ maxColumns: 1 as 0 | 1 | 2 | 3, compactMode: false }));
 const feed = vi.hoisted(() => ({
@@ -16,7 +16,12 @@ const feed = vi.hoisted(() => ({
   isFetchNextPageError: false,
 }));
 const sidebar = vi.hoisted(() => ({ setQuickFindOpen: vi.fn() }));
-const filterContext = vi.hoisted(() => ({ removeFilter: vi.fn() }));
+const filterContext = vi.hoisted(() => ({
+  filters: [{ factor: "celSearch", value: "pinned" }],
+  removeFilter: vi.fn(),
+  setFilters: vi.fn(),
+  setMemoView: vi.fn(),
+}));
 const readiness = vi.hoisted(() => ({ userSettings: true }));
 const memoQuery = vi.hoisted(() => ({ request: undefined as Record<string, unknown> | undefined }));
 
@@ -40,7 +45,12 @@ vi.mock("@/hooks/useMemoQueries", () => ({
 
 vi.mock("@/contexts/MemoFilterContext", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/contexts/MemoFilterContext")>()),
-  useMemoFilterContext: () => ({ filters: [{ factor: "celSearch", value: "pinned" }], removeFilter: filterContext.removeFilter }),
+  useMemoFilterContext: () => ({
+    filters: filterContext.filters,
+    removeFilter: filterContext.removeFilter,
+    setFilters: filterContext.setFilters,
+    setMemoView: filterContext.setMemoView,
+  }),
 }));
 
 vi.mock("@/contexts/AppSidebarContext", () => ({ useAppSidebar: () => sidebar }));
@@ -57,7 +67,7 @@ vi.mock("@/utils/i18n", () => ({
   useTranslate: () => (key: string) => (key === "message.no-data" ? "No data found." : key),
 }));
 
-vi.mock("@/components/MemoContent/MentionResolutionContext", () => ({
+vi.mock("@/contexts/MentionResolutionContext", () => ({
   MentionResolutionProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
@@ -69,11 +79,15 @@ const memo = { name: "memos/1", content: "hello", updateTime: undefined } as unk
 
 const renderList = (
   renderer: (memo: Memo, options: { compact: boolean }) => React.ReactElement = () => <div />,
-  options: { leading?: React.ReactNode } = {},
+  options: { leading?: React.ReactNode; emptyState?: React.ReactNode } = {},
 ) =>
   render(
     <QueryClientProvider client={new QueryClient()}>
-      <PagedMemoList renderer={renderer} renderLeading={options.leading ? () => options.leading : undefined} />
+      <PagedMemoList
+        renderer={renderer}
+        renderLeading={options.leading ? () => options.leading : undefined}
+        emptyState={options.emptyState}
+      />
     </QueryClientProvider>,
   );
 
@@ -90,6 +104,7 @@ describe("<PagedMemoList>", () => {
     feed.isFetchNextPageError = false;
     sidebar.setQuickFindOpen.mockClear();
     filterContext.removeFilter.mockClear();
+    filterContext.filters = [{ factor: "celSearch", value: "pinned" }];
     readiness.userSettings = true;
     memoQuery.request = undefined;
   });
@@ -232,11 +247,30 @@ describe("<PagedMemoList>", () => {
     expect(screen.getByTestId("leading-content")).toBeInTheDocument();
   });
 
-  it("uses the tile sprite Placeholder for the empty state", () => {
+  it("offers to clear filters when they return no memos, without an illustration", () => {
     renderList();
 
-    expect(screen.getByText("No data found.")).toBeInTheDocument();
-    expect(screen.getByTestId("placeholder-sprite")).toBeInTheDocument();
+    expect(screen.getByText("memo.no-matching-memos")).toBeInTheDocument();
+    expect(screen.queryByTestId("placeholder-illustration")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "memo.clear-filters" }));
+    expect(filterContext.setFilters).toHaveBeenCalledWith([]);
+    expect(filterContext.setMemoView).toHaveBeenCalledWith(undefined);
+  });
+
+  it("uses the blank memo illustration for an unfiltered empty list without route content", () => {
+    filterContext.filters = [];
+    renderList();
+
+    expect(screen.getByTestId("placeholder-illustration")).toHaveAttribute("data-scene", "memo");
+  });
+
+  it("renders the route's own first-use content for an unfiltered empty list", () => {
+    filterContext.filters = [];
+    renderList(undefined, { emptyState: <div data-testid="first-use" /> });
+
+    expect(screen.getByTestId("first-use")).toBeInTheDocument();
+    expect(screen.queryByTestId("placeholder-illustration")).not.toBeInTheDocument();
   });
 
   it("combines the selected Space filter with the memo list filter", () => {
@@ -255,8 +289,7 @@ describe("<PagedMemoList>", () => {
     renderList(undefined, { leading: <div data-testid="leading-content" /> });
 
     expect(screen.getByTestId("leading-content")).toBeInTheDocument();
-    expect(screen.getByText("No data found.")).toBeInTheDocument();
-    expect(screen.getByTestId("placeholder-sprite")).toBeInTheDocument();
+    expect(screen.getByText("memo.no-matching-memos")).toBeInTheDocument();
   });
 
   it("places leading content and the empty state in the first grid column", () => {
@@ -265,7 +298,7 @@ describe("<PagedMemoList>", () => {
     try {
       renderList(undefined, { leading: <div data-testid="leading-content" /> });
 
-      const leadingTile = screen.getByText("No data found.").closest(".absolute");
+      const leadingTile = screen.getByText("memo.no-matching-memos").closest(".absolute");
       expect(leadingTile).not.toBeNull();
       expect(leadingTile).toContainElement(screen.getByTestId("leading-content"));
     } finally {

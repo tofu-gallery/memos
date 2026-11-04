@@ -16,6 +16,12 @@ package store
 // A session-level lock (pg_advisory_lock) would stay on a server connection that the pooler goes on lending. Because
 // the work runs in the same transaction as the lock, a start never needs a second server connection while it holds
 // the lock, and a start that stops halfway leaves nothing behind: its transaction rolls back.
+//
+// Tofu (2026-11-04): upstream's 26.10 migrator saves the schema version in the same transaction as LATEST.sql and as
+// its migrations, and compares calendar schema versions itself (compareSchemaVersions). This file now saves the
+// version with upstream's writeSchemaVersionTx and compares with upstream's comparator. The lock is still needed:
+// upstream takes none, so several starts would still run LATEST.sql or the migrations at once, and server.go still
+// makes the signing key in every start that finds none.
 
 import (
 	"context"
@@ -25,9 +31,7 @@ import (
 	"uuid"
 
 	"github.com/pkg/errors"
-	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/usememos/memos/internal/version"
 	storepb "github.com/usememos/memos/proto/gen/store"
 )
 
@@ -89,10 +93,11 @@ func (s *Store) tofuInitializeSchema(ctx context.Context) error {
 }
 
 // tofuInitializeSchemaOnce runs, in one transaction that holds the schema lock: LATEST.sql, the schema version, the
-// key that signs sign-in tokens, and row-level security for Supabase's Data API (tofu_data_api.go). Upstream writes
-// the version after its transaction, and server.go makes the key later in every start that finds none: a start that
-// came in between would stop because the database looks too old to upgrade, or keep a key of its own and refuse the
-// sign-ins the other starts hand out. Here a start that waited for the lock finds all of it, or none of it.
+// key that signs sign-in tokens, and row-level security for Supabase's Data API (tofu_data_api.go). Upstream saves
+// the version in its own LATEST.sql transaction but takes no lock, and server.go makes the key later in every start
+// that finds none: starts at once would each run LATEST.sql, and a start that came in between would keep a key of its
+// own and refuse the sign-ins the other starts hand out. Here a start that waited for the lock finds all of it, or
+// none of it.
 func (s *Store) tofuInitializeSchemaOnce(ctx context.Context) error {
 	tx, err := s.driver.GetDB().BeginTx(ctx, nil)
 	if err != nil {
@@ -126,7 +131,8 @@ func (s *Store) tofuInitializeSchemaOnce(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to get current schema version")
 	}
-	if err := tofuSaveBasicSetting(ctx, tx, &storepb.InstanceBasicSetting{SchemaVersion: schemaVersion, SecretKey: uuid.NewV4().String()}); err != nil {
+	basicSetting := &storepb.InstanceBasicSetting{SecretKey: uuid.NewV4().String()}
+	if err := s.writeSchemaVersionTx(ctx, tx, basicSetting, schemaVersion); err != nil {
 		return err
 	}
 	if err := s.closeTablesToDataAPIInTx(ctx, tx); err != nil {
@@ -135,6 +141,7 @@ func (s *Store) tofuInitializeSchemaOnce(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return errors.Wrap(err, "failed to commit transaction")
 	}
+	s.cacheInstanceBasicSetting(ctx, basicSetting)
 	slog.Info("database initialized successfully", slog.String("schemaVersion", schemaVersion))
 	return nil
 }
@@ -157,49 +164,30 @@ func tofuStoredBasicSetting(ctx context.Context, tx *sql.Tx) (*storepb.InstanceB
 	return basic, nil
 }
 
-// tofuSaveBasicSetting writes the BASIC setting inside tx, as UpsertInstanceSetting would.
-func tofuSaveBasicSetting(ctx context.Context, tx *sql.Tx, basic *storepb.InstanceBasicSetting) error {
-	value, err := protojson.Marshal(basic)
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal instance basic setting")
-	}
-	stmt := "INSERT INTO system_setting (name, value, description) VALUES ($1, $2, '') ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
-	if _, err := tx.ExecContext(ctx, stmt, storepb.InstanceSettingKey_BASIC.String(), string(value)); err != nil {
-		return errors.Wrap(err, "failed to save the instance basic setting")
-	}
-	return nil
-}
-
 // tofuLockMigrations is the start of applyMigrations' transaction on PostgreSQL: it takes the schema lock, then reads
-// the stored schema version again. It returns that version, and done when another start applied the migrations up
-// to targetSchemaVersion while this one waited.
-func (s *Store) tofuLockMigrations(ctx context.Context, tx *sql.Tx, targetSchemaVersion string) (string, bool, error) {
+// the stored BASIC setting again. It returns that setting, which applyMigrations saves with the new schema version
+// in the same transaction, and done when another start applied the migrations up to targetSchemaVersion while this
+// one waited. A stored version newer than targetSchemaVersion stops the start, as upstream's Migrate does for a
+// version it finds before the lock. Tofu (2026-11-04): calendar schema versions are compared with upstream's
+// compareSchemaVersions, which replaced internal/version's comparator.
+func (*Store) tofuLockMigrations(ctx context.Context, tx *sql.Tx, targetSchemaVersion string) (*storepb.InstanceBasicSetting, bool, error) {
 	if err := tofuLockSchema(ctx, tx); err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 	basic, err := tofuStoredBasicSetting(ctx, tx)
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
-	if !isVersionEmpty(basic.SchemaVersion) && !version.IsVersionGreaterThan(targetSchemaVersion, basic.SchemaVersion) {
+	order, err := compareSchemaVersions(basic.SchemaVersion, targetSchemaVersion)
+	if err != nil {
+		return nil, false, err
+	}
+	if order > 0 {
+		return nil, false, errors.Errorf("cannot downgrade schema version from %s to %s", basic.SchemaVersion, targetSchemaVersion)
+	}
+	if order == 0 {
 		slog.Info("migrations already applied: another start applied them while this one waited", slog.String("schemaVersion", basic.SchemaVersion))
-		s.instanceSettingCache.Delete(ctx, storepb.InstanceSettingKey_BASIC.String())
-		return basic.SchemaVersion, true, nil
+		return basic, true, nil
 	}
-	return basic.SchemaVersion, false, nil
-}
-
-// tofuFinishMigrations is the end of applyMigrations' transaction on PostgreSQL: the new schema version, saved in the
-// same transaction so that a start that waited finds the migrations and the version together, and row-level security
-// for any table the migrations made.
-func (s *Store) tofuFinishMigrations(ctx context.Context, tx *sql.Tx, targetSchemaVersion string) error {
-	basic, err := tofuStoredBasicSetting(ctx, tx)
-	if err != nil {
-		return err
-	}
-	basic.SchemaVersion = targetSchemaVersion
-	if err := tofuSaveBasicSetting(ctx, tx, basic); err != nil {
-		return err
-	}
-	return s.closeTablesToDataAPIInTx(ctx, tx)
+	return basic, false, nil
 }

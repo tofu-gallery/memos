@@ -7,6 +7,7 @@ import MemoHeader from "@/components/MemoView/components/MemoHeader";
 const state = vi.hoisted(() => ({
   creator: undefined as { username: string; displayName: string; avatarUrl: string } | undefined,
   currentUser: undefined as { name: string } | undefined,
+  isEditing: false,
 }));
 
 vi.mock("@/components/RelativeTime", () => ({
@@ -51,10 +52,6 @@ vi.mock("@/i18n", () => ({
   default: { language: "en" },
 }));
 
-vi.mock("@/components/MemoView/hooks", () => ({
-  useMemoActions: () => ({ unpinMemo: vi.fn() }),
-}));
-
 vi.mock("@/components/MemoView/MemoViewContext", () => ({
   useMemoViewContext: () => ({
     memo: { name: "memos/123", visibility: 1, pinned: false, space: "spaces/product" },
@@ -63,6 +60,7 @@ vi.mock("@/components/MemoView/MemoViewContext", () => ({
     parentPage: "/explore?filter=tagSearch%3Awork",
     isArchived: false,
     readonly: false,
+    isEditing: state.isEditing,
     openEditor: vi.fn(),
   }),
   useMemoViewDerived: () => ({
@@ -91,6 +89,31 @@ describe("MemoHeader navigation", () => {
   beforeEach(() => {
     state.creator = undefined;
     state.currentUser = undefined;
+    state.isEditing = false;
+  });
+
+  it.each([false, true])("keeps only the creator while the card edits in place (showCreator=%s)", (showCreator) => {
+    state.currentUser = { name: "users/alice" };
+    state.creator = { username: "alice", displayName: "Alice", avatarUrl: "" };
+    state.isEditing = true;
+
+    const { container } = render(
+      <MemoryRouter>
+        <MemoHeader showCreator={showCreator} showVisibility showSpace />
+      </MemoryRouter>,
+    );
+
+    // The session below shows the editable time, visibility and Space; reacting and the menu wait.
+    expect(screen.queryByRole("link", { name: "time" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("memo-space")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "add-reaction" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "memo-actions" })).not.toBeInTheDocument();
+    if (showCreator) {
+      expect(screen.getByRole("link", { name: /Alice/ })).toBeInTheDocument();
+      expect(container).not.toHaveTextContent("·");
+    } else {
+      expect(container).toBeEmptyDOMElement();
+    }
   });
 
   it("uses one compact interaction surface for memo header actions", () => {
@@ -114,7 +137,7 @@ describe("MemoHeader navigation", () => {
     expect(reaction.className).not.toMatch(/border-none|rounded-full|ring-/);
   });
 
-  it.each([false, true])("uses a keyboard-operable timestamp and preserves origin when showCreator=%s", (showCreator) => {
+  it.each([false, true])("links the timestamp to the memo and preserves origin when showCreator=%s", (showCreator) => {
     if (showCreator) {
       state.creator = { username: "alice", displayName: "Alice", avatarUrl: "" };
     }
@@ -126,12 +149,25 @@ describe("MemoHeader navigation", () => {
       </MemoryRouter>,
     );
 
-    const timestamp = screen.getByRole("button", { name: "time" });
+    const timestamp = screen.getByRole("link", { name: "time" });
+    expect(timestamp).toHaveAttribute("href", "/memos/123");
+    if (showCreator) expect(screen.getByRole("link", { name: /Alice/ })).toHaveAttribute("href", "/?creator=alice");
     timestamp.focus();
     expect(timestamp).toHaveFocus();
 
     fireEvent.click(timestamp);
     expect(screen.getByTestId("location")).toHaveTextContent('/memos/123|{"from":"/explore?filter=tagSearch%3Awork"}');
+  });
+
+  it("shows the time as plain text on the memo's own page", () => {
+    render(
+      <MemoryRouter initialEntries={["/memos/123"]}>
+        <MemoHeader />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole("link", { name: "time" })).not.toBeInTheDocument();
+    expect(screen.getByText("time").closest("a, button")).toBeNull();
   });
 
   it.each([false, true])("keeps the Space pill beside the timestamp when showCreator=%s", (showCreator) => {
@@ -145,7 +181,7 @@ describe("MemoHeader navigation", () => {
       </MemoryRouter>,
     );
 
-    const timestamp = screen.getByRole("button", { name: "time" });
+    const timestamp = screen.getByRole("link", { name: "time" });
     const space = screen.getByTestId("memo-space");
     const metadata = space.closest('[data-slot="memo-header-meta"]');
 

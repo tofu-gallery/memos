@@ -1,28 +1,28 @@
 import { PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { MentionResolutionProvider } from "@/components/MemoContent/MentionResolutionContext";
-import MemoEditor from "@/components/MemoEditor";
-import type { MemoEditorProps } from "@/components/MemoEditor/types/components";
+import { type MemoDraftSeed, MemoEditor } from "@/components/MemoEditor";
 import MemoView from "@/components/MemoView";
 import type { MemoTimeDisplay } from "@/components/MemoView/types";
 import { buttonVariants } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
+import { MentionResolutionProvider } from "@/contexts/MentionResolutionContext";
 import { NewMemoProvider } from "@/contexts/NewMemoContext";
 import { useSpaceContext } from "@/contexts/SpaceContext";
 import { useView } from "@/contexts/ViewContext";
 import { cn } from "@/lib/utils";
-import type { Memo } from "@/types/proto/api/v1/memo_service_pb";
+import type { Memo } from "@/types/proto/api/memo_service_pb";
 import { useTranslate } from "@/utils/i18n";
 
 // The cards' own bottom margin sets the gap; the row's edge lines up with theirs.
 const COMPOSE_ROW_CLASS = cn(buttonVariants({ variant: "quiet", size: "sm" }), "self-start");
 
 export interface MemoPanelCompose {
-  cacheKey: string;
+  /** Where the new memo is composed, such as `calendar:<date>`; each scope keeps its own draft. */
+  scope: string;
   /** The quiet row's label, e.g. "New memo on this day". */
   label: string;
   /** What the new memo inherits from the selection: its day, its place. */
-  defaults?: Pick<MemoEditorProps, "defaultCreateTime" | "defaultLocation">;
+  defaults?: Pick<MemoDraftSeed, "createTime" | "location">;
   /** Whether the editor is open in place of the row, for hosts whose own gestures could dismiss it. */
   onComposingChange?: (composing: boolean) => void;
   onSavingChange?: (saving: boolean) => void;
@@ -51,7 +51,7 @@ export interface MemoPanelListProps {
 export function MemoPanelList({ memos, selectionKey, timeDisplay, emptyText, compose }: MemoPanelListProps) {
   const t = useTranslate();
   const { isUserSettingsInitialized } = useAuth();
-  const { selectedSpaceName } = useSpaceContext();
+  const { selectedSpaceName, creatorUsername } = useSpaceContext();
   const { compactMode } = useView();
   const [composingFor, setComposingFor] = useState<string>();
   const composing = composingFor === selectionKey;
@@ -62,9 +62,14 @@ export function MemoPanelList({ memos, selectionKey, timeDisplay, emptyText, com
   }, [composing, onComposingChange]);
 
   const contents = useMemo(() => memos.map((memo) => memo.content), [memos]);
+  // A mixed-author selection shows each card's creator; resolve them with the reactors in one batch.
+  const showCreator = !creatorUsername;
   const userNames = useMemo(
-    () => Array.from(new Set(memos.flatMap((memo) => memo.reactions.map((reaction) => reaction.creator)))),
-    [memos],
+    () =>
+      Array.from(
+        new Set(memos.flatMap((memo) => [...(showCreator ? [memo.creator] : []), ...memo.reactions.map((reaction) => reaction.creator)])),
+      ),
+    [memos, showCreator],
   );
 
   return (
@@ -75,8 +80,10 @@ export function MemoPanelList({ memos, selectionKey, timeDisplay, emptyText, com
             key={memo.name}
             memo={memo}
             timeDisplay={timeDisplay}
+            showCreator={showCreator}
             showVisibility
-            showPinned
+            // Pinning is the owner's arrangement, so it only shows in a single creator's scope, as on Home.
+            showPinned={!showCreator}
             showSpace={!selectedSpaceName}
             compact={compactMode}
           />
@@ -87,11 +94,9 @@ export function MemoPanelList({ memos, selectionKey, timeDisplay, emptyText, com
         isUserSettingsInitialized &&
         (composing ? (
           <MemoEditor
-            cacheKey={compose.cacheKey}
+            draft={{ scope: compose.scope, space: selectedSpaceName, ...compose.defaults }}
             autoFocus
             placeholder={t("editor.any-thoughts")}
-            defaultSpace={selectedSpaceName}
-            {...compose.defaults}
             onSavingChange={compose.onSavingChange}
             onConfirm={(name) => {
               setComposingFor(undefined);

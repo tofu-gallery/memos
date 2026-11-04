@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -13,9 +15,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/usememos/memos/core/configuration"
 	"github.com/usememos/memos/internal/profile"
 	"github.com/usememos/memos/internal/version"
 	"github.com/usememos/memos/internal/webhook"
+	apipb "github.com/usememos/memos/proto/gen/api"
 	storepb "github.com/usememos/memos/proto/gen/store"
 	"github.com/usememos/memos/server"
 	"github.com/usememos/memos/store"
@@ -42,8 +46,9 @@ var (
 	versionCmd = &cobra.Command{
 		Use:   "version",
 		Short: "Print the current Memos version",
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Println(version.GetCurrentVersion())
+		Run: func(cmd *cobra.Command, _ []string) {
+			// Print the root's version so every form shares one source.
+			fmt.Fprintln(cmd.OutOrStdout(), cmd.Root().Version)
 		},
 	}
 )
@@ -60,13 +65,15 @@ func init() {
 	rootCmd.Flags().Int("port", 8081, "port of server")
 	rootCmd.Flags().String("unix-sock", "", "path to the unix socket, overrides --addr and --port")
 	rootCmd.Flags().String("data", "", "data directory")
-	rootCmd.Flags().String("driver", "sqlite", "database driver (sqlite, mysql, postgres, d1)")
+	rootCmd.Flags().String("driver", "sqlite", "database driver (sqlite, mysql, postgres)")
 	rootCmd.Flags().String("dsn", "", "database source name (DSN)")
 	rootCmd.Flags().String("instance-url", "", "canonical external URL of the Memos instance")
 	rootCmd.Flags().Bool("allow-private-webhooks", false, "allow webhooks to access any private/reserved IP address")
 	rootCmd.Flags().StringSlice("webhook-private-network-allowlist", nil, "private webhook destinations to allow (exact hostname, IP, or CIDR)")
 	rootCmd.Flags().String("log-level", "info", "log verbosity level (debug, info, warn, error)")
 	rootCmd.Flags().Bool("rate-limit", true, "enable request rate limiting")
+	rootCmd.Flags().String("config-dir", configuration.DefaultDir, "directory of declarative configuration files")
+	rootCmd.Flags().String("config-apply", "startup", "when to apply the declarative configuration: startup, or off to leave it to memos config apply")
 	rootCmd.Flags().StringSlice("trusted-proxies", []string{"private"}, "proxies whose forwarding headers identify the client: CIDRs, IPs, \"private\" (default; the loopback and private ranges), or \"none\" when the instance is reached without a header-rewriting proxy")
 	// Tofu (2026-10-25): a deployment-level switch that keeps self-service sign-up closed (MEMOS_DISALLOW_USER_REGISTRATION).
 	rootCmd.Flags().Bool("disallow-user-registration", false, "keep self-service sign-up closed whatever the instance setting says (the first account can still be created)")
@@ -88,6 +95,8 @@ func init() {
 		"log-level",
 		"rate-limit",
 		"trusted-proxies",
+		"config-dir",
+		"config-apply",
 		"disallow-user-registration",
 	} {
 		if err := viper.BindPFlag(key, rootCmd.Flags().Lookup(key)); err != nil {
@@ -160,8 +169,17 @@ func runServer() error {
 	if err := storeInstance.Migrate(ctx); err != nil {
 		return errors.Wrap(err, "failed to migrate database")
 	}
-	if err := storeInstance.LoadDeploymentConfiguration(ctx); err != nil {
-		return errors.Wrap(err, "failed to load deployment configuration")
+	if err := applyConfigurationAtStartup(ctx, storeInstance); err != nil {
+		return errors.Wrap(err, "failed to apply the declarative configuration")
+	}
+	if files := legacySecretsFiles(legacySecretsDir); len(files) > 0 {
+		slog.Warn("deployment configuration files are no longer read since 26.10.0; declare them in the configuration directory instead", "files", files, "configDir", viper.GetString("config-dir"))
+	}
+	if instanceProfile.Demo {
+		// After the apply, so the demo content attaches to the declared users.
+		if err := storeInstance.Seed(ctx); err != nil {
+			return errors.Wrap(err, "failed to seed the demo content")
+		}
 	}
 	accessSetting, err := storeInstance.GetInstanceAccessSetting(ctx)
 	if err != nil {
@@ -231,8 +249,108 @@ func printServerInfo(profile *profile.Profile, accessMode storepb.InstanceAccess
 }
 
 func main() {
+	if err := version.Validate(); err != nil {
+		slog.Error("invalid build metadata", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	if err := rootCmd.Execute(); err != nil {
+		var exit exitCodeError
+		if errors.As(err, &exit) {
+			os.Exit(exit.code)
+		}
 		slog.Error("memos failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+}
+
+// applyConfigurationAtStartup applies the configuration directory after
+// migration and before any service starts, so the instance never serves with a
+// configuration it could not apply. Replicas that apply through a job before a
+// rollout pass --config-apply=off.
+func applyConfigurationAtStartup(ctx context.Context, storeInstance *store.Store) error {
+	switch mode := viper.GetString("config-apply"); mode {
+	case "off":
+		return nil
+	case "startup":
+	default:
+		return errors.Errorf("--config-apply must be startup or off, got %q", mode)
+	}
+	dir := viper.GetString("config-dir")
+	desired, err := configuration.Load(dir, configuration.OSResolver())
+	if err != nil {
+		return err
+	}
+	for _, warning := range desired.Warnings {
+		slog.Warn("configuration warning", "warning", warning)
+	}
+	plan, state, err := configuration.Apply(ctx, desired, storeInstance, configMetadata("startup"))
+	if err != nil {
+		return err
+	}
+	for _, warning := range plan.Message.Warnings {
+		slog.Warn("configuration warning", "warning", warning)
+	}
+	if !plan.Valid() {
+		return errors.Errorf("configuration in %s cannot be applied:\n  %s", dir, strings.Join(plan.Message.Errors, "\n  "))
+	}
+	if !plan.HasChanges() {
+		if plan.Message.Serial > 0 {
+			slog.Info("configuration unchanged", "dir", dir, "serial", plan.Message.Serial)
+		}
+		return nil
+	}
+	changed := []string{}
+	for _, change := range plan.Message.ResourceChanges {
+		if change.Action != apipb.ResourceChange_NO_OP {
+			changed = append(changed, strings.ToLower(change.Action.String())+" "+change.Resource)
+		}
+	}
+	slog.Info("applied configuration", "dir", dir, "serial", state.Serial, "digest", state.ConfigDigest, "changes", changed)
+	return nil
+}
+
+// exitCodeError ends the process with code once a command has printed its own
+// output, such as a plan with changes under --detailed-exitcode.
+type exitCodeError struct {
+	code int
+}
+
+func (e exitCodeError) Error() string {
+	return fmt.Sprintf("exit status %d", e.code)
+}
+
+// legacySecretsDir held the v0.31 deployment configuration files
+// (memos-idp-*.json and memos-instance-setting-*.json), which 26.10.0 stopped
+// reading without a migration.
+const legacySecretsDir = "/etc/secrets"
+
+var legacyInstanceSettingFilenameMatcher = regexp.MustCompile(`^memos-instance-setting-[a-z0-9]+(?:-[a-z0-9]+)*\.json$`)
+
+// isLegacySecretsFilename reports whether the v0.31 loader read name. It took
+// any memos-idp-*.json, warning only about names that were not lowercase kebab
+// case, but required kebab case for instance settings.
+func isLegacySecretsFilename(name string) bool {
+	if strings.HasPrefix(name, "memos-idp-") && strings.HasSuffix(name, ".json") {
+		return true
+	}
+	return legacyInstanceSettingFilenameMatcher.MatchString(name)
+}
+
+// legacySecretsFiles lists the v0.31 deployment configuration files still
+// present in dir, so startup can say that nothing reads them: an operator who
+// kept the files through the upgrade would otherwise learn it only from the
+// settings they expected to be in effect. The files are not opened, and a
+// missing or unreadable directory yields nothing.
+func legacySecretsFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, entry := range entries {
+		if !entry.IsDir() && isLegacySecretsFilename(entry.Name()) {
+			files = append(files, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return files
 }

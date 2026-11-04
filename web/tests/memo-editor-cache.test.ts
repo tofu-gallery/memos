@@ -1,9 +1,9 @@
 import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cacheService } from "@/components/MemoEditor/services/cacheService";
-import { AttachmentSchema, MotionMediaFamily, MotionMediaRole, MotionMediaSchema } from "@/types/proto/api/v1/attachment_service_pb";
+import { cacheService } from "@/components/MemoEditor/edit/services/cacheService";
+import { AttachmentSchema, MotionMediaFamily, MotionMediaRole, MotionMediaSchema } from "@/types/proto/api/attachment_service_pb";
 
-import { LocationSchema } from "@/types/proto/api/v1/memo_service_pb";
+import { LocationSchema, Visibility } from "@/types/proto/api/memo_service_pb";
 
 describe("memo editor cache", () => {
   beforeEach(() => {
@@ -23,7 +23,7 @@ describe("memo editor cache", () => {
   it("stores draft content", () => {
     const key = cacheService.key("users/steven", "home-memo-editor");
 
-    cacheService.saveNow(key, "- [x] Draft task");
+    cacheService.saveNow(key, { content: "- [x] Draft task", attachments: [] });
 
     expect(cacheService.load(key)).toBe("- [x] Draft task");
   });
@@ -31,7 +31,7 @@ describe("memo editor cache", () => {
   it("removes empty draft content instead of caching it", () => {
     const key = cacheService.key("users/steven", "home-memo-editor");
 
-    cacheService.saveNow(key, "");
+    cacheService.saveNow(key, { content: "", attachments: [] });
 
     expect(cacheService.load(key)).toBe("");
   });
@@ -58,7 +58,7 @@ describe("memo editor cache", () => {
       }),
     });
 
-    cacheService.saveNow(key, "![garden](/file/attachments/image-one)", [attachment]);
+    cacheService.saveNow(key, { content: "![garden](/file/attachments/image-one)", attachments: [attachment] });
 
     const restored = cacheService.loadDraft(key);
     expect(restored.content).toBe("![garden](/file/attachments/image-one)");
@@ -95,21 +95,54 @@ describe("memo editor cache", () => {
 
   it("round-trips an edited or removed location and isolates Space drafts", () => {
     const point = create(LocationSchema, { latitude: 0, longitude: 135, placeholder: "Cafe" });
-    cacheService.saveNow("map:space-a:point", "draft", [], point);
-    cacheService.saveNow("map:space-b:point", "draft", [], null);
+    cacheService.saveNow("map:space-a:point", { content: "draft", attachments: [], location: point });
+    cacheService.saveNow("map:space-b:point", { content: "draft", attachments: [], location: null });
     expect(cacheService.loadDraft("map:space-a:point").location).toEqual(point);
     expect(cacheService.loadDraft("map:space-b:point").location).toBeNull();
     localStorage.setItem("legacy", JSON.stringify({ kind: "memos.editor-cache", version: 2, content: "old", attachments: [] }));
     expect(cacheService.loadDraft("legacy").location).toBeUndefined();
   });
 
+  it("persists a chosen destination before typing, and clears it with the draft", () => {
+    cacheService.saveNow("destination", { content: "", attachments: [], space: "spaces/work", visibility: Visibility.PRIVATE });
+    expect(cacheService.loadDraft("destination")).toMatchObject({ space: "spaces/work", visibility: Visibility.PRIVATE });
+    cacheService.saveNow("destination", { content: "draft", attachments: [], visibility: Visibility.PRIVATE });
+    expect(cacheService.loadDraft("destination").space).toBeUndefined();
+    cacheService.clear("destination");
+    expect(cacheService.loadDraft("destination").space).toBeUndefined();
+  });
+
+  it("ignores invalid cached settings while preserving legacy content and location", () => {
+    localStorage.setItem(
+      "legacy-location",
+      JSON.stringify({ kind: "memos.editor-cache", version: 3, content: "old", location: null, space: 42, visibility: 999 }),
+    );
+    expect(cacheService.loadDraft("legacy-location")).toMatchObject({
+      content: "old",
+      location: null,
+      space: undefined,
+      visibility: undefined,
+    });
+  });
+
   it("keeps the cursor for the next editor mount", () => {
     const key = cacheService.key("users/steven", "global-memo-editor");
 
-    cacheService.saveCursor(key, 9);
+    const selection = { anchor: { block: 1, offset: 9 }, focus: { block: 1, offset: 9 } };
+    cacheService.saveCursor(key, selection, "rich");
 
-    expect(cacheService.loadCursor(key)).toBe(9);
+    expect(cacheService.loadCursor(key, "rich")).toEqual(selection);
     cacheService.clear(key);
-    expect(cacheService.loadCursor(key)).toBeUndefined();
+    expect(cacheService.loadCursor(key, "rich")).toBeUndefined();
+  });
+
+  it("drops a cursor taken in the other editor mode", () => {
+    const key = cacheService.key("users/steven", "global-memo-editor");
+
+    // Source mode is one block of Markdown, so its offsets mean nothing to rich mode.
+    cacheService.saveCursor(key, { anchor: { block: 0, offset: 42 }, focus: { block: 0, offset: 42 } }, "source");
+
+    expect(cacheService.loadCursor(key, "rich")).toBeUndefined();
+    expect(cacheService.loadCursor(key, "source")).toBeDefined();
   });
 });

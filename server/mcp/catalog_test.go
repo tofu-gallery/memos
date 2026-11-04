@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,10 +53,10 @@ func TestBuildToolFromOperationIncludesSchemasAndMetadata(t *testing.T) {
 	require.Equal(t, "Memo List Memos", tool.Title)
 	require.Equal(t, "MemoService_ListMemos", operation.OperationID)
 	require.Equal(t, "GET", operation.Method)
-	require.Equal(t, "/api/v1/memos", operation.Path)
+	require.Equal(t, "/api/memos", operation.Path)
 	require.Equal(t, "MemoService_ListMemos", tool.Meta["operationId"])
 	require.Equal(t, "GET", tool.Meta["method"])
-	require.Equal(t, "/api/v1/memos", tool.Meta["path"])
+	require.Equal(t, "/api/memos", tool.Meta["path"])
 	require.NotEmpty(t, tool.Description)
 	require.NotNil(t, tool.InputSchema)
 	require.NotNil(t, tool.OutputSchema)
@@ -155,7 +156,7 @@ func TestBuildToolFromOperationTailorsRequestBodySchemas(t *testing.T) {
 			omittedProperties: []string{"name"},
 		},
 		{
-			name:        "upsert reaction gets name from path",
+			name:        "upsert reaction gets parent from path",
 			operationID: "MemoService_UpsertMemoReaction",
 			arguments: map[string]any{
 				"memo": "memos/abc123",
@@ -165,7 +166,7 @@ func TestBuildToolFromOperationTailorsRequestBodySchemas(t *testing.T) {
 					},
 				},
 			},
-			omittedProperties: []string{"name"},
+			omittedProperties: []string{"parent"},
 		},
 	}
 
@@ -376,6 +377,29 @@ func TestValidateOperationOverridesRejectsStaleKey(t *testing.T) {
 	require.ErrorContains(t, validateOperationOverrides(registry), "MemoService_UpdateMemo")
 }
 
+func TestValidateOperationOverridesRejectsStaleOmittedProperty(t *testing.T) {
+	spec, err := loadOpenAPISpec("../../proto/gen/openapi.yaml")
+	require.NoError(t, err)
+	registry, err := buildOperationRegistry(spec)
+	require.NoError(t, err)
+
+	// A binding rename (name -> parent) must be reported instead of leaving the
+	// path-bound field exposed in the body schema.
+	operation := registry["MemoService_UpsertMemoReaction"]
+	renamed := cloneSchema(operation.RequestBodySchema)
+	properties := maps.Clone(schemaProperties(renamed["properties"]))
+	properties["name"] = properties["parent"]
+	delete(properties, "parent")
+	renamed["properties"] = properties
+	registry["MemoService_UpsertMemoReaction"] = &openAPIOperation{
+		OperationID:       operation.OperationID,
+		RequestBodySchema: renamed,
+	}
+	err = validateOperationOverrides(registry)
+	require.ErrorContains(t, err, `omits property "parent"`)
+	require.ErrorContains(t, err, "MemoService_UpsertMemoReaction")
+}
+
 func TestBuildCuratedToolsRejectsDuplicateToolNames(t *testing.T) {
 	registry := make(map[string]*openAPIOperation, len(curatedOperationIDs))
 	for _, operationID := range curatedOperationIDs {
@@ -383,7 +407,7 @@ func TestBuildCuratedToolsRejectsDuplicateToolNames(t *testing.T) {
 			OperationID:    operationID,
 			Description:    operationID,
 			Method:         "GET",
-			Path:           "/api/v1/test",
+			Path:           "/api/test",
 			ResponseSchema: okSchema(),
 		}
 	}
@@ -457,7 +481,7 @@ func TestBuildToolFromOperationExposesSpaceTools(t *testing.T) {
 	tool, operation := buildToolFromOperation(registry["SpaceService_ListSpaces"])
 	require.Equal(t, "space_list_spaces", tool.Name)
 	require.Equal(t, "GET", operation.Method)
-	require.Equal(t, "/api/v1/spaces", operation.Path)
+	require.Equal(t, "/api/spaces", operation.Path)
 	require.True(t, tool.Annotations.ReadOnlyHint)
 
 	tool, operation = buildToolFromOperation(registry["SpaceService_CreateSpace"])

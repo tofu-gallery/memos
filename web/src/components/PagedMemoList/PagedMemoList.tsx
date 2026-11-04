@@ -1,10 +1,10 @@
 import { ArrowUpIcon, LoaderCircleIcon } from "lucide-react";
 import { type ReactElement, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { MentionResolutionProvider } from "@/components/MemoContent/MentionResolutionContext";
 import { Button } from "@/components/ui/button";
 import { useAppSidebar } from "@/contexts/AppSidebarContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { isSearchFilter, useMemoFilterContext } from "@/contexts/MemoFilterContext";
+import { MentionResolutionProvider } from "@/contexts/MentionResolutionContext";
 import { useNewMemo } from "@/contexts/NewMemoContext";
 import { useView } from "@/contexts/ViewContext";
 import { useDelayedFlag } from "@/hooks/useDelayedFlag";
@@ -13,12 +13,13 @@ import { hoistMemoToFront } from "@/hooks/useMemoSorting";
 import { combineCELFilters } from "@/lib/cel-filter";
 import { DEFAULT_LIST_MEMOS_PAGE_SIZE, LOADING_INDICATOR_DELAY_MS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
-import { State } from "@/types/proto/api/v1/common_pb";
-import type { Memo } from "@/types/proto/api/v1/memo_service_pb";
+import { State } from "@/types/proto/api/common_pb";
+import type { Memo } from "@/types/proto/api/memo_service_pb";
 import { useTranslate } from "@/utils/i18n";
 import ColumnGrid, { ColumnGridUntrappedProvider, columnCountForWidth, GRID_GAP } from "../ColumnGrid";
 import MemoFilters from "../MemoFilters";
 import Placeholder from "../Placeholder";
+import EmptyLine from "./EmptyLine";
 import MemoListError from "./MemoListError";
 import { estimateMemoCardHeight } from "./memoCardHeight";
 
@@ -51,8 +52,8 @@ interface Props {
   renderLeading?: (options: { useGrid: boolean }) => ReactNode;
   /** Route-owned content spanning the full list width above every column (e.g. a page identity block). */
   renderHeader?: (options: { useGrid: boolean }) => ReactNode;
-  /** Replaces the generic empty-state message when the route knows why the list is empty. */
-  emptyMessage?: string;
+  /** Route-owned first-use content for an empty, unfiltered list. Without it the generic placeholder shows. */
+  emptyState?: ReactNode;
 }
 
 function useAutoFetchWhenNotScrollable({
@@ -122,7 +123,7 @@ function useAutoFetchWhenNotScrollable({
 const PagedMemoList = (props: Props) => {
   const t = useTranslate();
   const { isUserSettingsInitialized } = useAuth();
-  const { filters, memoView, removeFilter } = useMemoFilterContext();
+  const { filters, memoView, removeFilter, setFilters, setMemoView } = useMemoFilterContext();
   const { setQuickFindOpen } = useAppSidebar();
   const { maxColumns, compactMode } = useView();
   // maxColumns is a ceiling: 1 = single reading column, 0 = as many as fit. The single
@@ -230,10 +231,18 @@ const PagedMemoList = (props: Props) => {
     [props.showCreator, displayMemoList],
   );
 
-  const emptyPlaceholder =
-    !isDisplayPending && !isError && !isFetchingNextPage && !hasNextPage && displayMemoList.length === 0 ? (
-      <Placeholder variant="empty" message={props.emptyMessage ?? t("message.no-data")} className="w-full" />
-    ) : null;
+  const hasFilters = filters.length > 0 || memoView !== undefined;
+  const isEmpty = !isDisplayPending && !isError && !isFetchingNextPage && !hasNextPage && displayMemoList.length === 0;
+  const clearFilters = () => {
+    setFilters([]);
+    setMemoView(undefined);
+  };
+  // No results is neutral and offers the way out; first use belongs to the route.
+  const emptyPlaceholder = !isEmpty ? null : hasFilters ? (
+    <EmptyLine message={t("memo.no-matching-memos")} action={t("memo.clear-filters")} onAction={clearFilters} />
+  ) : (
+    (props.emptyState ?? <Placeholder scene="memo" message={t("message.no-data")} className="w-full" />)
+  );
   const initialLoader = isDisplayPending && showLoader ? <Loader /> : null;
   // Only a query the user typed can be edited or cleared from the error; facet and scope
   // filters are fixed by the route.
@@ -254,7 +263,6 @@ const PagedMemoList = (props: Props) => {
   // empty state follows them. The newest memo also lands directly beneath them (priorityKey
   // above). Every vertical seam inside the stack uses GRID_GAP so y-spacing matches the
   // grid's x-spacing exactly.
-  const hasFilters = filters.length > 0 || memoView !== undefined;
   const gridLeading =
     leadingContent || hasFilters || initialLoader || emptyPlaceholder || initialError ? (
       <div className="flex w-full flex-col" style={{ gap: GRID_GAP }}>

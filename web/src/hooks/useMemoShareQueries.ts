@@ -2,15 +2,16 @@ import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { memoServiceClient } from "@/connect";
-import type { Attachment } from "@/types/proto/api/v1/attachment_service_pb";
-import type { MemoShare } from "@/types/proto/api/v1/memo_service_pb";
+import type { Attachment } from "@/types/proto/api/attachment_service_pb";
+import type { MemoShare } from "@/types/proto/api/memo_service_pb";
 import {
   CreateMemoShareRequestSchema,
   DeleteMemoShareRequestSchema,
   GetSharedMemoRequestSchema,
   ListMemoSharesRequestSchema,
   MemoShareSchema,
-} from "@/types/proto/api/v1/memo_service_pb";
+} from "@/types/proto/api/memo_service_pb";
+import { getAttachmentUrl } from "@/utils/attachment";
 
 // Query keys factory for share-related cache management.
 export const memoShareKeys = {
@@ -96,6 +97,6 @@ export function getShareToken(share: MemoShare): string {
 export function withShareAttachmentLinks(attachments: Attachment[], token: string): Attachment[] {
   return attachments.map((a) => {
     if (a.externalLink) return a;
-    return { ...a, externalLink: `${window.location.origin}/file/${a.name}/${a.filename}?share_token=${encodeURIComponent(token)}` };
+    return { ...a, externalLink: `${getAttachmentUrl(a)}?share_token=${encodeURIComponent(token)}` };
   });
 }

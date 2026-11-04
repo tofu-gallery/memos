@@ -1,6 +1,6 @@
 // Package test contains black-box startup smoke tests for the full server.
 //
-// Every other server test constructs apiv1.APIV1Service directly, which skips
+// Every other server test constructs api.APIService directly, which skips
 // server.NewServer entirely. That leaves route registration, gRPC-gateway
 // wiring, MCP/fileserver/frontend mounting, CORS and the secret bootstrap
 // covered only by the Docker release script. These tests boot the real server
@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	// sqlite driver.
 	_ "modernc.org/sqlite"
 
+	"github.com/usememos/memos/core/configuration"
 	"github.com/usememos/memos/internal/profile"
 	"github.com/usememos/memos/internal/version"
 	storepb "github.com/usememos/memos/proto/gen/store"
@@ -51,6 +53,9 @@ type instanceOptions struct {
 	// dataDir reuses an existing data directory instead of a fresh one, which
 	// is how a restart against an already-migrated database is simulated.
 	dataDir string
+	// configDir is the declarative configuration directory applied at
+	// startup; empty means a directory that does not exist.
+	configDir string
 }
 
 // instance is a booted server plus the HTTP plumbing needed to talk to it.
@@ -62,8 +67,8 @@ type instance struct {
 }
 
 // bootInstance starts a full server following the same sequence as
-// cmd/memos/main.go: validate profile, open the driver, migrate, load
-// deployment configuration, construct the server, then listen.
+// cmd/memos/main.go: validate profile, open the driver, migrate, apply the
+// declarative configuration, construct the server, then listen.
 //
 // Keep this in lockstep with main.go. The value of these tests comes from
 // exercising the real startup path rather than a hand-assembled subset of it.
@@ -94,11 +99,19 @@ func bootInstance(ctx context.Context, t *testing.T, opts instanceOptions) *inst
 	storeInstance := store.New(dbDriver, instanceProfile)
 	require.NoError(t, storeInstance.Migrate(ctx), "should migrate database")
 
-	// main.go calls LoadDeploymentConfiguration, which scans the fixed
-	// /etc/secrets path. Point the scan at a per-test directory so the result
-	// cannot depend on host state; the missing-directory branch is identical.
-	require.NoError(t, storeInstance.LoadDeploymentConfigurationDir(ctx, filepath.Join(dataDir, "secrets")),
-		"should load deployment configuration")
+	configDir := opts.configDir
+	if configDir == "" {
+		configDir = filepath.Join(dataDir, "no-configuration")
+	}
+	desired, err := configuration.Load(configDir, configuration.OSResolver())
+	require.NoError(t, err, "should load the configuration")
+	plan, _, err := configuration.Apply(ctx, desired, storeInstance, configuration.ApplyMetadata{AppliedBy: "startup test", Now: time.Now()})
+	require.NoError(t, err, "should apply the configuration")
+	require.True(t, plan.Valid(), "the configuration should be applicable: %v", plan.Message.Errors)
+	if opts.demo {
+		// As the server does: after the apply, so content attaches to declared users.
+		require.NoError(t, storeInstance.Seed(ctx), "should seed the demo content")
+	}
 
 	s, err := server.NewServer(ctx, instanceProfile, storeInstance)
 	require.NoError(t, err, "should construct server")
@@ -176,7 +189,7 @@ func (i *instance) do(t *testing.T, method, path, token string, body any) (int, 
 func (i *instance) createAdmin(t *testing.T) {
 	t.Helper()
 
-	status, body := i.do(t, http.MethodPost, "/api/v1/users", "", map[string]any{
+	status, body := i.do(t, http.MethodPost, "/api/users", "", map[string]any{
 		"username": testAdminUsername,
 		"password": testAdminPassword,
 		"email":    "startup-admin@example.test",
@@ -196,7 +209,7 @@ func (i *instance) createAdmin(t *testing.T) {
 func (i *instance) signIn(t *testing.T) string {
 	t.Helper()
 
-	status, body := i.do(t, http.MethodPost, "/api/v1/auth/signin", "", map[string]any{
+	status, body := i.do(t, http.MethodPost, "/api/auth/signin", "", map[string]any{
 		"passwordCredentials": map[string]any{
 			"username": testAdminUsername,
 			"password": testAdminPassword,
@@ -216,7 +229,7 @@ func (i *instance) signIn(t *testing.T) string {
 func (i *instance) createMemo(t *testing.T, token, memoID, content string) {
 	t.Helper()
 
-	status, body := i.do(t, http.MethodPost, "/api/v1/memos?memoId="+memoID, token, map[string]any{
+	status, body := i.do(t, http.MethodPost, "/api/memos?memoId="+memoID, token, map[string]any{
 		"content":    content,
 		"visibility": "PRIVATE",
 	})
@@ -235,7 +248,7 @@ func (i *instance) createMemo(t *testing.T, token, memoID, content string) {
 func (i *instance) requireMemo(t *testing.T, token, memoID, content string) {
 	t.Helper()
 
-	status, body := i.do(t, http.MethodGet, "/api/v1/memos/"+memoID, token, nil)
+	status, body := i.do(t, http.MethodGet, "/api/memos/"+memoID, token, nil)
 	require.Equal(t, http.StatusOK, status, "reading memo %s should succeed: %s", memoID, body)
 
 	var fetched struct {
@@ -252,6 +265,21 @@ func unusedPort(t *testing.T) int {
 	require.NoError(t, err)
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+// TestHealthzReportsDatabaseOutage verifies /healthz checks the database
+// instead of always answering ready.
+func TestHealthzReportsDatabaseOutage(t *testing.T) {
+	ctx := context.Background()
+	inst := bootInstance(ctx, t, instanceOptions{instanceURL: "http://localhost"})
+
+	status, _ := inst.do(t, http.MethodGet, "/healthz", "", nil)
+	require.Equal(t, http.StatusOK, status)
+
+	require.NoError(t, inst.server.Store.GetDriver().GetDB().Close())
+	status, body := inst.do(t, http.MethodGet, "/healthz", "", nil)
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	require.Equal(t, "Database unavailable.", string(body))
 }
 
 // TestStartupServesEveryRegisteredRouter boots a fresh instance and checks that
@@ -276,13 +304,13 @@ func TestStartupServesEveryRegisteredRouter(t *testing.T) {
 	})
 
 	t.Run("api gateway", func(t *testing.T) {
-		status, body := inst.do(t, http.MethodGet, "/api/v1/instance/profile", "", nil)
+		status, body := inst.do(t, http.MethodGet, "/api/instance/profile", "", nil)
 		require.Equal(t, http.StatusOK, status, "instance profile should be public: %s", body)
 		require.Contains(t, string(body), "version")
 	})
 
 	t.Run("api gateway form post fallback", func(t *testing.T) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, inst.baseURL+"/api/v1/instance/profile", strings.NewReader(""))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, inst.baseURL+"/api/instance/profile", strings.NewReader(""))
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
@@ -302,6 +330,22 @@ func TestStartupServesEveryRegisteredRouter(t *testing.T) {
 			"method":  "tools/list",
 		})
 		require.NotEqual(t, http.StatusNotFound, status, "mcp route should be mounted")
+	})
+
+	t.Run("oauth discovery is not advertised", func(t *testing.T) {
+		// MCP clients probe RFC 9728 metadata before trusting the endpoint.
+		// The MCP server authenticates with personal access tokens, so the
+		// well-known paths must 404 instead of falling back to the SPA.
+		for _, requestPath := range []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"} {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, inst.baseURL+requestPath, nil)
+			require.NoError(t, err)
+			resp, err := inst.client.Do(req)
+			require.NoError(t, err)
+			resp.Body.Close()
+
+			require.Equal(t, http.StatusNotFound, resp.StatusCode, requestPath)
+			require.NotContains(t, resp.Header.Get("Content-Type"), "text/html", requestPath)
+		}
 	})
 }
 
@@ -360,16 +404,16 @@ func TestStartupPrivateInstance(t *testing.T) {
 	require.Equal(t, storepb.InstanceAccessMode_INSTANCE_ACCESS_MODE_PRIVATE, accessSetting.AccessMode)
 
 	// Bootstrap methods stay reachable so the sign-in page can render.
-	status, body := inst.do(t, http.MethodGet, "/api/v1/instance/profile", "", nil)
+	status, body := inst.do(t, http.MethodGet, "/api/instance/profile", "", nil)
 	require.Equal(t, http.StatusOK, status, "instance profile is an auth bootstrap method: %s", body)
 
 	// Protected procedures are refused for anonymous callers.
-	status, _ = inst.do(t, http.MethodGet, "/api/v1/users", "", nil)
+	status, _ = inst.do(t, http.MethodGet, "/api/users", "", nil)
 	require.Equal(t, http.StatusUnauthorized, status, "anonymous ListUsers should be refused")
 
 	// ListMemos is public but not a bootstrap method, so the private-instance
 	// policy must refuse anonymous callers. The Connect transport enforces this.
-	status, _ = inst.do(t, http.MethodPost, "/memos.api.v1.MemoService/ListMemos", "", map[string]any{})
+	status, _ = inst.do(t, http.MethodPost, "/memos.api.MemoService/ListMemos", "", map[string]any{})
 	require.Equal(t, http.StatusUnauthorized, status,
 		"anonymous ListMemos over Connect should be refused on a private instance")
 
@@ -399,7 +443,7 @@ func TestStartupInitializesLegacyAccessOnce(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, storepb.InstanceAccessMode_INSTANCE_ACCESS_MODE_PUBLIC, accessSetting.AccessMode)
 
-		status, body := second.do(t, http.MethodGet, "/api/v1/memos", "", nil)
+		status, body := second.do(t, http.MethodGet, "/api/memos", "", nil)
 		require.Equal(t, http.StatusOK, status, "persisted PUBLIC mode should still allow anonymous access: %s", body)
 	})
 
@@ -416,7 +460,7 @@ func TestStartupInitializesLegacyAccessOnce(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, storepb.InstanceAccessMode_INSTANCE_ACCESS_MODE_PRIVATE, accessSetting.AccessMode)
 
-		status, _ := second.do(t, http.MethodGet, "/api/v1/memos", "", nil)
+		status, _ := second.do(t, http.MethodGet, "/api/memos", "", nil)
 		require.Equal(t, http.StatusUnauthorized, status, "canonical URL must not reopen a persisted PRIVATE instance")
 	})
 }
@@ -439,16 +483,16 @@ func TestStartupPrivateInstanceGatewayPolicy(t *testing.T) {
 	token := inst.signIn(t)
 	inst.createMemo(t, token, "startup-private-public", "public on a private instance")
 	status, body := inst.do(t, http.MethodPatch,
-		"/api/v1/memos/startup-private-public?updateMask=visibility", token, map[string]any{
+		"/api/memos/startup-private-public?updateMask=visibility", token, map[string]any{
 			"visibility": "PUBLIC",
 		})
 	require.Equal(t, http.StatusOK, status, "should be able to make the memo public: %s", body)
 
-	status, _ = inst.do(t, http.MethodGet, "/api/v1/memos", "", nil)
+	status, _ = inst.do(t, http.MethodGet, "/api/memos", "", nil)
 	require.Equal(t, http.StatusUnauthorized, status,
 		"anonymous ListMemos over REST should be refused on a private instance")
 
-	status, _ = inst.do(t, http.MethodGet, "/api/v1/memos/startup-private-public", "", nil)
+	status, _ = inst.do(t, http.MethodGet, "/api/memos/startup-private-public", "", nil)
 	require.Equal(t, http.StatusUnauthorized, status,
 		"anonymous GetMemo over REST should be refused on a private instance")
 }
@@ -459,7 +503,7 @@ func TestStartupPrivateInstanceGatewayPolicy(t *testing.T) {
 // attachment; the schema types that field as an object, so clients validating
 // responses against it — MCP clients serve that schema as the tool outputSchema
 // — reject every memo carrying an attachment. The marshaler override lives in
-// RegisterGateway, so only a booted server proves it is wired in.
+// NewHandler, so only a booted server proves it is wired in.
 func TestStartupGatewayOmitsNullMessageFields(t *testing.T) {
 	ctx := context.Background()
 	inst := bootInstance(ctx, t, instanceOptions{instanceURL: "http://localhost"})
@@ -470,7 +514,7 @@ func TestStartupGatewayOmitsNullMessageFields(t *testing.T) {
 	// A 1x1 GIF: small enough to inline, real enough for the type sniffing the
 	// attachment service runs on upload.
 	const onePixelGIF = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
-	status, body := inst.do(t, http.MethodPost, "/api/v1/attachments", token, map[string]any{
+	status, body := inst.do(t, http.MethodPost, "/api/attachments", token, map[string]any{
 		"filename": "pixel.gif",
 		"type":     "image/gif",
 		"content":  onePixelGIF,
@@ -483,7 +527,7 @@ func TestStartupGatewayOmitsNullMessageFields(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &created))
 	require.NotEmpty(t, created.Name, "the created attachment should carry a name: %s", body)
 
-	status, body = inst.do(t, http.MethodGet, "/api/v1/"+created.Name, token, nil)
+	status, body = inst.do(t, http.MethodGet, "/api/"+created.Name, token, nil)
 	require.Equal(t, http.StatusOK, status, "reading the attachment should succeed: %s", body)
 
 	fetched := map[string]any{}
@@ -495,8 +539,8 @@ func TestStartupGatewayOmitsNullMessageFields(t *testing.T) {
 	require.Equal(t, "image/gif", fetched["type"])
 }
 
-// TestStartupDemoMode verifies demo mode boots, which exercises the seed path
-// in store.Migrate that prod-mode startups never touch.
+// TestStartupDemoMode verifies demo mode boots, which exercises the seed step
+// that prod-mode startups never run.
 func TestStartupDemoMode(t *testing.T) {
 	ctx := context.Background()
 	inst := bootInstance(ctx, t, instanceOptions{
@@ -504,7 +548,7 @@ func TestStartupDemoMode(t *testing.T) {
 		instanceURL: "http://localhost",
 	})
 
-	status, body := inst.do(t, http.MethodGet, "/api/v1/memos", "", nil)
+	status, body := inst.do(t, http.MethodGet, "/api/memos", "", nil)
 	require.Equal(t, http.StatusOK, status, "demo instances serve memos anonymously: %s", body)
 
 	var listed struct {
@@ -514,4 +558,38 @@ func TestStartupDemoMode(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(body, &listed))
 	require.NotEmpty(t, listed.Memos, "demo mode should seed memos")
+}
+
+// TestStartupAppliesConfiguration boots a headless instance from files alone:
+// the administrator signs in without anyone having opened the browser, and the
+// configured settings are what the API serves.
+func TestStartupAppliesConfiguration(t *testing.T) {
+	ctx := context.Background()
+	configDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "instance.json"), []byte(`{
+		"instanceSettings": [
+			{"name": "instance/settings/ACCESS", "accessSetting": {"accessMode": "INSTANCE_ACCESS_MODE_PUBLIC"}},
+			{"name": "instance/settings/GENERAL", "generalSetting": {"customProfile": {"title": "Configured Memos"}}}
+		],
+		"users": [{"name": "users/`+testAdminUsername+`", "username": "`+testAdminUsername+`", "role": "ADMIN", "password": "${env:MEMOS_TEST_ADMIN_PASSWORD}"}]
+	}`), 0o600))
+	t.Setenv("MEMOS_TEST_ADMIN_PASSWORD", testAdminPassword)
+	inst := bootInstance(ctx, t, instanceOptions{configDir: configDir})
+
+	token := inst.signIn(t)
+	status, body := inst.do(t, http.MethodGet, "/api/instance/settings/GENERAL", "", nil)
+	require.Equal(t, http.StatusOK, status, "a public instance serves GENERAL anonymously: %s", body)
+	require.Contains(t, string(body), "Configured Memos")
+
+	status, body = inst.do(t, http.MethodGet, "/api/instance/configuration", token, nil)
+	require.Equal(t, http.StatusOK, status, "%s", body)
+	var configurationStatus struct {
+		Serial           string `json:"serial"`
+		ManagedResources []struct {
+			Resource string `json:"resource"`
+		} `json:"managedResources"`
+	}
+	require.NoError(t, json.Unmarshal(body, &configurationStatus))
+	require.Equal(t, "1", configurationStatus.Serial)
+	require.Len(t, configurationStatus.ManagedResources, 3)
 }
