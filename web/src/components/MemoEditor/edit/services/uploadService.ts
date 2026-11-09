@@ -21,6 +21,7 @@ export const uploadService = {
         mediaMetadata,
       }),
       totalSize: BigInt(file.size),
+      replaceAttachment: localFile.replaces ?? "",
     });
     // Tofu (2026-10-25): a file that fits in one chunk goes up in a single call carrying the spec, the bytes and
     // finishWrite, which the server accepts. Such an upload never depends on server memory between two calls, so it
