@@ -65,20 +65,27 @@ describe("Paper theme", () => {
     expect(themeTokens.filter((name) => !declarations.has(name))).toEqual([]);
   });
 
+  it.each(["canvas", "surface"])("keeps control boundaries on %s at 3:1 or more", (background) => {
+    expect(contrast("control-edge", background)).toBeGreaterThanOrEqual(3);
+  });
+
   // Every text and background pair color.md's Usage column names keeps 4.5:1 or more.
   it.each([
-    ["ink", "canvas"],
-    ["ink", "surface"],
-    ["ink", "well"],
-    ["ink", "key"],
-    ["ink", "hover"],
-    ["ink", "key-hover"],
-    ["ink-muted", "canvas"],
-    ["ink-muted", "surface"],
-    ["ink-muted", "well"],
-    ["ink-muted", "key"],
-    ["ink-muted", "hover"],
-    ["ink-muted", "key-hover"],
+    ["text", "canvas"],
+    ["text", "surface"],
+    ["text", "well"],
+    ["text", "key"],
+    ["text", "hover"],
+    ["text", "key-hover"],
+    ["text-secondary", "canvas"],
+    ["text-secondary", "surface"],
+    ["text-secondary", "well"],
+    ["text-secondary", "key"],
+    ["text-secondary", "hover"],
+    ["text-secondary", "key-hover"],
+    ["text-disabled", "canvas"],
+    ["text-disabled", "surface"],
+    ["text-disabled", "well"],
     ["on-primary", "primary"],
     ["on-primary", "primary-hover"],
     ["accent", "canvas"],

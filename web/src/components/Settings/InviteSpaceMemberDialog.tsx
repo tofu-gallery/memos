@@ -145,7 +145,7 @@ const InviteSpaceMemberDialog = ({ open, onOpenChange, space, viewerName, member
                 <UserAvatar className="size-8" avatarUrl={candidate.avatarUrl} name={candidate.displayName || candidate.username} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate mu-label">{candidate.displayName || `@${candidate.username}`}</p>
-                  <p className="truncate mu-caption text-mu-ink-muted">
+                  <p className="truncate mu-caption text-mu-text-secondary">
                     @{candidate.username} · {resultStatus}
                   </p>
                 </div>
@@ -154,7 +154,7 @@ const InviteSpaceMemberDialog = ({ open, onOpenChange, space, viewerName, member
             ) : null}
 
             {normalizedUsername && lookupSettled && usersQuery.isSuccess && !candidate ? (
-              <p className="mu-caption text-mu-ink-muted">{t("setting.spaces.user-not-found", { username: normalizedUsername })}</p>
+              <p className="mu-caption text-mu-text-secondary">{t("setting.spaces.user-not-found", { username: normalizedUsername })}</p>
             ) : null}
           </Field.Root>
 
@@ -168,8 +168,8 @@ const InviteSpaceMemberDialog = ({ open, onOpenChange, space, viewerName, member
                   <Field.Label className="items-start">
                     <Radio value={option.value} className="mt-0.5" />
                     <span className="flex flex-col gap-0.5">
-                      <span className="text-mu-ink">{option.label}</span>
-                      <span className="mu-caption text-mu-ink-muted">{option.description}</span>
+                      <span className="text-mu-text">{option.label}</span>
+                      <span className="mu-caption text-mu-text-secondary">{option.description}</span>
                     </span>
                   </Field.Label>
                 </Field.Item>

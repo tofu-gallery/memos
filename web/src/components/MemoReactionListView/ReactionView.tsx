@@ -7,14 +7,17 @@ import type { User } from "@/types/proto/api/user_service_pb";
 import { formatReactionTooltip, useReactionActions } from "./hooks";
 
 /** A reaction is a chip in the Badge's grammar, the same shape and height as a tag. */
-const REACTION_PILL_CLASSES = "inline-flex h-5 shrink-0 items-center gap-1.5 rounded-mu-sm bg-mu-well px-1.5 mu-caption text-mu-ink";
+const REACTION_PILL_CLASSES = "inline-flex h-5 shrink-0 items-center gap-1.5 rounded-mu-sm bg-mu-well px-1.5 mu-caption text-mu-text";
 const REACTION_PILL_INTERACTIVE_CLASSES = cn(
   REACTION_PILL_CLASSES,
-  "cursor-pointer transition-colors hover:bg-mu-hover hover:text-mu-ink aria-pressed:bg-mu-hover aria-pressed:text-mu-ink data-popup-open:bg-mu-hover data-popup-open:text-mu-ink",
-  "mu-focus",
+  "cursor-pointer transition-colors hover:bg-mu-hover hover:text-mu-text aria-pressed:bg-mu-hover aria-pressed:text-mu-text data-popup-open:bg-mu-hover data-popup-open:text-mu-text",
+  "border border-transparent mu-focus focus-visible:border-mu-focus",
 );
 /** The strip's add control is a control, not a token: a quiet square of the chips' height with no resting surface. */
-export const REACTION_ADD_CLASSES = cn(REACTION_PILL_INTERACTIVE_CLASSES, "size-5 justify-center bg-transparent px-0 text-mu-ink-muted");
+export const REACTION_ADD_CLASSES = cn(
+  REACTION_PILL_INTERACTIVE_CLASSES,
+  "size-5 justify-center bg-transparent px-0 text-mu-text-secondary",
+);
 
 interface Props {
   memo: Memo;
@@ -34,7 +37,7 @@ const ReactionView = (props: Props) => {
   const label = (
     <>
       <span className="mu-body">{reactionType}</span>
-      <span className="mu-caption tabular-nums text-mu-ink-muted">{users.length}</span>
+      <span className="mu-caption tabular-nums text-mu-text-secondary">{users.length}</span>
     </>
   );
 
